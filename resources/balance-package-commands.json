@@ -1,0 +1,35 @@
+{
+  "commands_to_add": [
+    {
+      "command": "augment.balance.refresh",
+      "title": "Augment: 刷新余额",
+      "category": "Augment"
+    },
+    {
+      "command": "augment.balance.showDetails",
+      "title": "Augment: 显示余额详情",
+      "category": "Augment"
+    }
+  ],
+  "configuration_to_add": {
+    "title": "Augment Balance",
+    "properties": {
+      "augmentBalance.token": {
+        "type": "string",
+        "default": "",
+        "description": "Orb Portal Token for balance monitoring"
+      },
+      "augmentBalance.refreshInterval": {
+        "type": "number",
+        "default": 3600000,
+        "description": "Balance refresh interval in milliseconds (default: 1 hour)"
+      },
+      "augmentBalance.showInStatusBar": {
+        "type": "boolean",
+        "default": true,
+        "description": "Show balance in status bar"
+      }
+    }
+  }
+}
+
