@@ -1,0 +1,1119 @@
+name: Build Augment Injector All Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Specific version to build (e.g., 0.571.0) or leave empty to build all versions'
+        required: false
+        type: string
+      build_all:
+        description: 'Build all available versions'
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate resources
+        run: |
+          echo "🔍 Validating required resources..."
+          
+          # Check required JS files
+          for file in interceptor.js token-login-enhanced.js augment-balance-enhanced.js; do
+            if [ ! -f "resources/$file" ]; then
+              echo "❌ Missing required file: resources/$file"
+              exit 1
+            fi
+            echo "✅ Found: resources/$file"
+          done
+          
+          # Check required config files
+          for file in package-json-commands.json balance-package-commands.json README.md; do
+            if [ ! -f "resources/$file" ]; then
+              echo "❌ Missing required file: resources/$file"
+              exit 1
+            fi
+            echo "✅ Found: resources/$file"
+          done
+          
+          echo "✅ All required resources validated"
+
+      - name: Get all versions
+        id: get_versions
+        run: |
+          echo "📋 Fetching all version information..."
+          
+          # Query for all versions (increase pageSize to get more versions)
+          curl 'https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery' \
+          -X POST \
+          -H 'Host: marketplace.visualstudio.com' \
+          -H 'Connection: keep-alive' \
+          -H 'Accept-Language: zh-CN' \
+          -H 'Origin: vscode-file://vscode-app' \
+          -H 'Sec-Fetch-Dest: empty' \
+          -H 'Sec-Fetch-Mode: cors' \
+          -H 'Sec-Fetch-Site: cross-site' \
+          -H 'User-Agent: VSCode 1.105.1 (Code)' \
+          -H 'VSCode-SessionId: 5a02a7663e73c1ede42c84001cc5dd32b420199590de98de1f5a19a19eb383e4' \
+          -H 'X-Market-Client-Id: VSCode 1.105.1' \
+          -H 'X-Market-User-Id: df23a44f-eb51-4249-86fa-d399f925367d' \
+          -H 'accept: application/json;api-version=3.0-preview.1' \
+          -H 'content-type: application/json' \
+          -H 'sec-ch-ua: "Not)A;Brand";v="8", "Chromium";v="138"' \
+          -H 'sec-ch-ua-mobile: ?0' \
+          -H 'sec-ch-ua-platform: "macOS"' \
+          --data-raw '{"filters":[{"criteria":[{"filterType":7,"value":"Augment.vscode-augment"},{"filterType":8,"value":"Microsoft.VisualStudio.Code"},{"filterType":12,"value":"4096"}],"pageNumber":1,"pageSize":1000,"sortBy":0,"sortOrder":0}],"assetTypes":[],"flags":55}' \
+          --compressed -o all_versions.json
+          
+          # Extract all versions from JSON
+          python3 << 'PYEOF'
+          import json
+          
+          # Read version data
+          with open('all_versions.json', 'r') as f:
+              data = json.load(f)
+          
+          # Extract all versions
+          versions = []
+          if 'results' in data and len(data['results']) > 0 and 'extensions' in data['results'][0]:
+              for ext in data['results'][0]['extensions']:
+                  if 'versions' in ext:
+                      for version in ext['versions']:
+                          versions.append(version['version'])
+          
+          # Sort versions (newest first)
+          versions.sort(reverse=True)
+          
+          # Save all versions to file
+          with open('versions_list.txt', 'w') as f:
+              for version in versions:
+                  f.write(f"{version}\n")
+          
+          # Get latest version
+          latest_version = versions[0] if versions else ""
+          
+          print(f"Found {len(versions)} versions")
+          print(f"Latest version: {latest_version}")
+          
+          # Save to environment file
+          with open('version_env.txt', 'w') as f:
+              f.write(f"LATEST_VERSION={latest_version}\n")
+              f.write(f"TOTAL_VERSIONS={len(versions)}\n")
+          PYEOF
+          
+          # Load environment variables
+          source version_env.txt
+          echo "LATEST_VERSION=$LATEST_VERSION" >> $GITHUB_ENV
+          echo "TOTAL_VERSIONS=$TOTAL_VERSIONS" >> $GITHUB_ENV
+          
+          # Determine which version(s) to build
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "BUILD_VERSION=${{ github.event.inputs.version }}" >> $GITHUB_ENV
+            echo "BUILD_MODE=single" >> $GITHUB_ENV
+            echo "🎯 Will build specific version: ${{ github.event.inputs.version }}"
+          elif [ "${{ github.event.inputs.build_all }}" = "true" ]; then
+            echo "BUILD_MODE=all" >> $GITHUB_ENV
+            echo "🔄 Will build all versions ($TOTAL_VERSIONS versions)"
+          else
+            echo "BUILD_VERSION=$LATEST_VERSION" >> $GITHUB_ENV
+            echo "BUILD_MODE=single" >> $GITHUB_ENV
+            echo "🔄 Will build latest version: $LATEST_VERSION"
+          fi
+
+      - name: Build all versions
+        if: env.BUILD_MODE == 'all'
+        run: |
+          echo "🚀 Starting to build all versions..."
+          
+          # Read all versions
+          VERSIONS=$(cat versions_list.txt)
+          BUILT_COUNT=0
+          SKIPPED_COUNT=0
+          FAILED_COUNT=0
+          
+          # Create results file
+          echo "BUILD_RESULTS:" > build_results.txt
+          
+          for VERSION in $VERSIONS; do
+            echo ""
+            echo "=================================================="
+            echo "🔄 Processing version: $VERSION"
+            echo "=================================================="
+            
+            # Check if version already released
+            TAG_NAME="v${VERSION}-triple"
+            if git tag -l | grep -q "^${TAG_NAME}$"; then
+              echo "✅ Tag ${TAG_NAME} already exists, skipping version $VERSION"
+              echo "SKIPPED: $VERSION (already exists)" >> build_results.txt
+              SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+              continue
+            fi
+            
+            # Create a temporary directory for this version
+            TEMP_DIR="temp_build_${VERSION//./_}"
+            mkdir -p "$TEMP_DIR"
+            cd "$TEMP_DIR"
+            
+            # Download the specific version
+            echo "📥 Downloading Augment VSIX version $VERSION..."
+            PUBLISHER="augment"
+            EXTENSION_NAME="vscode-augment"
+            VSIX_URL="https://marketplace.visualstudio.com/_apis/public/gallery/publishers/${PUBLISHER}/vsextensions/${EXTENSION_NAME}/${VERSION}/vspackage"
+            
+            if curl -L --compressed -o original.vsix "$VSIX_URL" --fail; then
+              echo "✅ VSIX downloaded successfully for version $VERSION"
+            else
+              echo "❌ Failed to download VSIX for version $VERSION"
+              echo "FAILED: $VERSION (download failed)" >> ../build_results.txt
+              FAILED_COUNT=$((FAILED_COUNT + 1))
+              cd ..
+              rm -rf "$TEMP_DIR"
+              continue
+            fi
+            
+            # Extract VSIX
+            echo "📦 Extracting VSIX for version $VERSION..."
+            mkdir -p unpacked_ext
+            cd unpacked_ext
+            if unzip -q ../original.vsix; then
+              echo "✅ VSIX extracted for version $VERSION"
+            else
+              echo "❌ Failed to extract VSIX for version $VERSION"
+              echo "FAILED: $VERSION (extraction failed)" >> ../../build_results.txt
+              FAILED_COUNT=$((FAILED_COUNT + 1))
+              cd ../..
+              rm -rf "$TEMP_DIR"
+              continue
+            fi
+            cd ..
+            
+            # Get version from package.json
+            PKG_PATH=""
+            if [ -f "unpacked_ext/package.json" ]; then
+              PKG_PATH="unpacked_ext/package.json"
+            elif [ -f "unpacked_ext/extension/package.json" ]; then
+              PKG_PATH="unpacked_ext/extension/package.json"
+            else
+              echo "❌ package.json not found for version $VERSION"
+              echo "FAILED: $VERSION (package.json not found)" >> ../build_results.txt
+              FAILED_COUNT=$((FAILED_COUNT + 1))
+              cd ..
+              rm -rf "$TEMP_DIR"
+              continue
+            fi
+            
+            ACTUAL_VERSION=$(python3 -c "import json; print(json.load(open('$PKG_PATH'))['version'])")
+            if [ "$ACTUAL_VERSION" != "$VERSION" ]; then
+              echo "⚠️ Version mismatch: requested $VERSION but got $ACTUAL_VERSION"
+              VERSION=$ACTUAL_VERSION
+              TAG_NAME="v${VERSION}-triple"
+              # Check again with actual version
+              if git tag -l | grep -q "^${TAG_NAME}$"; then
+                echo "✅ Tag ${TAG_NAME} already exists, skipping version $VERSION"
+                echo "SKIPPED: $VERSION (actual version already exists)" >> ../build_results.txt
+                SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+                cd ..
+                rm -rf "$TEMP_DIR"
+                continue
+              fi
+            fi
+            
+            # Perform injection and build
+            echo "🚀 Performing triple injection for version $VERSION..."
+            
+            python3 << 'PYEOF'
+            import os, sys, shutil, json, re, stat
+            from pathlib import Path
+            from datetime import datetime
+
+            def log(msg):
+                print(f"[INFO] {msg}")
+
+            def error(msg):
+                print(f"[ERROR] {msg}")
+                sys.exit(1)
+
+            # Find extension.js file
+            def find_extension_js(base_dir):
+                candidates = [
+                    base_dir / 'extension' / 'out' / 'extension.js',
+                    base_dir / 'extension' / 'dist' / 'extension.js', 
+                    base_dir / 'out' / 'extension.js',
+                    base_dir / 'dist' / 'extension.js',
+                    base_dir / 'extension.js'
+                ]
+                
+                for candidate in candidates:
+                    if candidate.exists():
+                        return candidate, candidate.parent
+                return None, None
+
+            # Inject at head with proper formatting
+            def inject_head(js_file, inject_content, tag):
+                log(f"Injecting {tag} at head...")
+                content = js_file.read_text(encoding='utf-8')
+                
+                # Remove existing injection if present
+                pattern = rf"// === {re.escape(tag)} Start ===.*?// === {re.escape(tag)} End ===\s*"
+                content = re.sub(pattern, '', content, flags=re.DOTALL)
+                
+                # Create injection with proper formatting
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                injection = f"// === {tag} Start ===\n"
+                injection += f"// 注入时间: {timestamp}\n"
+                injection += f"// 注入版本: 1.0\n"
+                injection += "!function(){\n"
+                injection += '"use strict";\n'
+                injection += inject_content + "\n"
+                injection += "}();\n"
+                injection += f"// === {tag} End ===\n\n"
+                
+                js_file.write_text(injection + content, encoding='utf-8')
+                return True
+
+            # Inject at tail with proper formatting
+            def inject_tail(js_file, inject_content, tag):
+                log(f"Injecting {tag} at tail...")
+                content = js_file.read_text(encoding='utf-8')
+                
+                # Remove existing injection if present
+                pattern = rf"// === {re.escape(tag)} Start ===.*?// === {re.escape(tag)} End ===\s*"
+                content = re.sub(pattern, '', content, flags=re.DOTALL)
+                
+                # Create injection with proper formatting
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                injection = f"\n\n// === {tag} Start ===\n"
+                injection += f"// 注入时间: {timestamp}\n"
+                injection += "!function(){\n"
+                injection += '"use strict";\n'
+                injection += inject_content + "\n"
+                injection += "}();\n"
+                injection += f"// === {tag} End ==="
+                
+                js_file.write_text(content + injection, encoding='utf-8')
+                return True
+
+            try:
+                # Find extension.js
+                unpacked = Path('unpacked_ext')
+                js_path, js_dir = find_extension_js(unpacked)
+                
+                if not js_path:
+                    error("extension.js not found!")
+                
+                log(f"Found extension.js: {js_path}")
+                
+                # Fix file permissions
+                js_path.chmod(stat.S_IWRITE | stat.S_IREAD)
+                log("File permissions fixed")
+                
+                # Read injection files
+                resources = Path('../resources')
+                interceptor_content = (resources / 'interceptor.js').read_text(encoding='utf-8')
+
+                # Prepare loader snippets
+                token_loader = """// Token登录增强模块注入（仅模块初始化）
+            !function(){
+            "use strict";
+            try {
+                const AugmentTokenLoginEnhanced = require('./token-login-enhanced.js');
+                if (typeof global !== 'undefined') {
+                    global.augmentTokenLoginInstance = new AugmentTokenLoginEnhanced();
+                    console.log('[TokenLogin] Global instance created successfully');
+                }
+            } catch (error) {
+                console.error('[TokenLogin] Module initialization failed:', error);
+            }
+            }();"""
+
+                balance_loader = """// 余额显示增强模块注入（仅模块初始化）
+            !function(){
+            "use strict";
+            try {
+                const AugmentBalanceEnhanced = require('./augment-balance-enhanced.js');
+                if (typeof global !== 'undefined') {
+                    global.augmentBalanceInstance = new AugmentBalanceEnhanced();
+                    console.log('[BalanceEnhanced] Global instance created successfully');
+                }
+            } catch (error) {
+                console.error('[BalanceEnhanced] Module initialization failed:', error);
+            }
+            }();"""
+
+                triple_exports_handler = """// 三重注入统一exports处理
+            !function(){
+            "use strict";
+            try {
+                const originalActivate = (typeof module !== 'undefined' && module.exports && module.exports.activate)
+                    ? module.exports.activate
+                    : (context) => {};
+                const originalDeactivate = (typeof module !== 'undefined' && module.exports && module.exports.deactivate)
+                    ? module.exports.deactivate
+                    : () => {};
+
+                async function tripleActivate(context) {
+                    try {
+                        if (typeof originalActivate === 'function') {
+                            await originalActivate(context);
+                        }
+                        if (typeof global !== 'undefined' && global.augmentTokenLoginInstance) {
+                            try {
+                                await global.augmentTokenLoginInstance.initialize(context);
+                            } catch (error) {
+                                console.error('[TripleInjection] Token login initialization failed:', error);
+                            }
+                        }
+                        if (typeof global !== 'undefined' && global.augmentBalanceInstance) {
+                            try {
+                                await global.augmentBalanceInstance.initialize(context);
+                            } catch (error) {
+                                console.error('[TripleInjection] Balance display initialization failed:', error);
+                            }
+                        }
+                    } catch (error) {
+                        console.error('[TripleInjection] Triple activation failed:', error);
+                        throw error;
+                    }
+                }
+
+                function tripleDeactivate() {
+                    try {
+                        if (typeof global !== 'undefined' && global.augmentBalanceInstance) {
+                            try {
+                                if (typeof global.augmentBalanceInstance.dispose === 'function') {
+                                    global.augmentBalanceInstance.dispose();
+                                }
+                            } catch (error) {
+                                console.error('[TripleInjection] Balance display disposal failed:', error);
+                            }
+                        }
+                        if (typeof global !== 'undefined' && global.augmentTokenLoginInstance) {
+                            try {
+                                if (typeof global.augmentTokenLoginInstance.dispose === 'function') {
+                                    global.augmentTokenLoginInstance.dispose();
+                                }
+                            } catch (error) {
+                                console.error('[TripleInjection] Token login disposal failed:', error);
+                            }
+                        }
+                        if (typeof originalDeactivate === 'function') {
+                            originalDeactivate();
+                        }
+                    } catch (error) {
+                        console.error('[TripleInjection] Triple deactivation failed:', error);
+                    }
+                }
+
+                if (typeof module !== 'undefined' && module.exports) {
+                    const newExports = {};
+                    for (const key in module.exports) {
+                        if (key !== 'activate' && key !== 'deactivate') {
+                            try {
+                                newExports[key] = module.exports[key];
+                            } catch (error) {
+                                console.warn(`[TripleInjection] Failed to copy property ${key}:`, error);
+                            }
+                        }
+                    }
+                    newExports.activate = tripleActivate;
+                    newExports.deactivate = tripleDeactivate;
+                    module.exports = newExports;
+                }
+            } catch (error) {
+                console.error('[TripleInjection] Triple exports handler failed:', error);
+            }
+            }();"""
+
+                # Copy module files
+                shutil.copy(resources / 'token-login-enhanced.js', js_dir / 'token-login-enhanced.js')
+                shutil.copy(resources / 'augment-balance-enhanced.js', js_dir / 'augment-balance-enhanced.js')
+                log("Module files copied")
+
+                # Perform injections
+                inject_head(js_path, interceptor_content, 'Augment Interceptor Injection')
+                inject_tail(js_path, token_loader, 'Augment Token Login Enhanced Injection')
+                inject_tail(js_path, balance_loader, 'Augment Balance Enhanced Injection')
+                inject_tail(js_path, triple_exports_handler, 'Augment Triple Exports Handler')
+
+                log("✅ Triple injection completed successfully")
+                
+            except Exception as e:
+                error(f"Injection failed: {e}")
+            PYEOF
+            
+            # Update package.json
+            echo "📝 Updating package.json for version $VERSION..."
+            
+            python3 << 'PYEOF'
+            import json
+            from pathlib import Path
+
+            def log(msg):
+                print(f"[INFO] {msg}")
+
+            try:
+                unpacked = Path('unpacked_ext')
+                pkg_candidates = [
+                    unpacked / 'extension' / 'package.json',
+                    unpacked / 'package.json'
+                ]
+
+                pkg_path = None
+                for candidate in pkg_candidates:
+                    if candidate.exists():
+                        pkg_path = candidate
+                        break
+
+                if not pkg_path:
+                    raise FileNotFoundError("package.json not found")
+
+                with open(pkg_path, 'r', encoding='utf-8') as f:
+                    pkg_data = json.load(f)
+
+                resources = Path('../resources')
+
+                if 'contributes' not in pkg_data:
+                    pkg_data['contributes'] = {}
+                if 'commands' not in pkg_data['contributes']:
+                    pkg_data['contributes']['commands'] = []
+
+                # Update commands
+                if (resources / 'package-json-commands.json').exists():
+                    with open(resources / 'package-json-commands.json', 'r', encoding='utf-8') as f:
+                        pkg_commands = json.load(f)
+                    for cmd in pkg_commands.get('commands_to_add', []):
+                        exists = any(existing.get('command') == cmd.get('command')
+                                   for existing in pkg_data['contributes']['commands'])
+                        if not exists:
+                            pkg_data['contributes']['commands'].append(cmd)
+
+                if (resources / 'balance-package-commands.json').exists():
+                    with open(resources / 'balance-package-commands.json', 'r', encoding='utf-8') as f:
+                        balance_commands = json.load(f)
+                    for cmd in balance_commands.get('commands_to_add', []):
+                        exists = any(existing.get('command') == cmd.get('command')
+                                   for existing in pkg_data['contributes']['commands'])
+                        if not exists:
+                            pkg_data['contributes']['commands'].append(cmd)
+
+                    # Add configuration
+                    if 'configuration_to_add' in balance_commands:
+                        config = balance_commands['configuration_to_add']
+                        if 'configuration' not in pkg_data['contributes']:
+                            pkg_data['contributes']['configuration'] = []
+                        
+                        if isinstance(pkg_data['contributes']['configuration'], list):
+                            balance_config_exists = any(c.get('title') == 'Augment Balance' 
+                                                      for c in pkg_data['contributes']['configuration'])
+                            if not balance_config_exists:
+                                new_config = {
+                                    "title": config.get('title', 'Augment Balance'),
+                                    "properties": config.get('properties', {})
+                                }
+                                pkg_data['contributes']['configuration'].append(new_config)
+                        elif isinstance(pkg_data['contributes']['configuration'], dict):
+                            if 'properties' not in pkg_data['contributes']['configuration']:
+                                pkg_data['contributes']['configuration']['properties'] = {}
+                            for prop_name, prop_config in config.get('properties', {}).items():
+                                if prop_name not in pkg_data['contributes']['configuration']['properties']:
+                                    pkg_data['contributes']['configuration']['properties'][prop_name] = prop_config
+
+                with open(pkg_path, 'w', encoding='utf-8') as f:
+                    json.dump(pkg_data, f, indent=2, ensure_ascii=False)
+
+                log("✅ package.json updated successfully")
+
+            except Exception as e:
+                print(f"[ERROR] Failed to update package.json: {e}")
+                exit(1)
+            PYEOF
+            
+            # Merge README
+            echo "📄 Merging README for version $VERSION..."
+            
+            python3 << 'PYEOF'
+            from pathlib import Path
+
+            try:
+                unpacked = Path('unpacked_ext')
+                resources = Path('../resources')
+
+                original_readme = None
+                readme_candidates = [
+                    unpacked / 'extension' / 'README.md',
+                    unpacked / 'README.md'
+                ]
+
+                for candidate in readme_candidates:
+                    if candidate.exists():
+                        original_readme = candidate
+                        break
+
+                custom_readme = resources / 'README.md'
+                if not custom_readme.exists():
+                    raise FileNotFoundError("Custom README.md not found in resources")
+
+                custom_content = custom_readme.read_text(encoding='utf-8')
+
+                if original_readme:
+                    original_content = original_readme.read_text(encoding='utf-8')
+                    merged_content = custom_content + "\n\n---\n\n# Original Extension Documentation\n\n" + original_content
+                    original_readme.write_text(merged_content, encoding='utf-8')
+                else:
+                    target_path = unpacked / 'README.md'
+                    target_path.write_text(custom_content, encoding='utf-8')
+
+            except Exception as e:
+                print(f"[ERROR] Failed to merge README: {e}")
+                exit(1)
+            PYEOF
+            
+            # Package VSIX
+            echo "📦 Packaging modified VSIX for version $VERSION..."
+            cd unpacked_ext
+            if zip -r ../augment.vscode-augment-${VERSION}-triple.vsix . -x "*.DS_Store" "*.git*"; then
+              echo "✅ VSIX packaged for version $VERSION"
+            else
+              echo "❌ Failed to package VSIX for version $VERSION"
+              echo "FAILED: $VERSION (packaging failed)" >> ../../build_results.txt
+              FAILED_COUNT=$((FAILED_COUNT + 1))
+              cd ../..
+              rm -rf "$TEMP_DIR"
+              continue
+            fi
+            cd ..
+            
+            # Create Release
+            echo "🏷️ Creating release for version $VERSION..."
+            BUILD_DATE=$(date '+%Y-%m-%d %H:%M:%S')
+            
+            if gh release create "v${VERSION}-triple" \
+              "augment.vscode-augment-${VERSION}-triple.vsix" \
+              --title "Augment VSCode Extension v${VERSION} (Triple Injected)" \
+              --notes "# Augment VSCode Extension v${VERSION} - Triple Injected Version
+
+              ## 🚀 Features
+              - **Triple Injection**: Interceptor + Token Login + Balance Enhanced
+              - **Session Management**: Advanced session handling and spoofing
+              - **Request Interception**: Comprehensive HTTP/HTTPS request modification
+              - **Balance Enhancement**: Enhanced balance display and management
+
+              ## 📥 Installation
+              1. Download the \`.vsix\` file from this release
+              2. Open VS Code
+              3. Go to Extensions (Ctrl+Shift+X)
+              4. Click the \"...\" menu and select \"Install from VSIX...\"
+              5. Select the downloaded file
+
+              ## 🔧 Technical Details
+              - **Base Version**: v${VERSION}
+              - **Injection Type**: Triple
+              - **Build Date**: ${BUILD_DATE}
+              - **Auto-built**: Yes (GitHub Actions)
+
+              ---
+              *This release was automatically generated from the marketplace version ${VERSION}.*" \
+              --draft=false \
+              --prerelease=false; then
+              echo "✅ Release created for version $VERSION"
+              echo "BUILT: $VERSION" >> ../build_results.txt
+              BUILT_COUNT=$((BUILT_COUNT + 1))
+            else
+              echo "❌ Failed to create release for version $VERSION"
+              echo "FAILED: $VERSION (release creation failed)" >> ../build_results.txt
+              FAILED_COUNT=$((FAILED_COUNT + 1))
+            fi
+            
+            # Go back to parent directory and clean up
+            cd ..
+            rm -rf "$TEMP_DIR"
+          done
+          
+          # Save counts to environment
+          echo "BUILT_COUNT=$BUILT_COUNT" >> $GITHUB_ENV
+          echo "SKIPPED_COUNT=$SKIPPED_COUNT" >> $GITHUB_ENV
+          echo "FAILED_COUNT=$FAILED_COUNT" >> $GITHUB_ENV
+          
+          echo ""
+          echo "=================================================="
+          echo "📊 Build Summary:"
+          echo "=================================================="
+          echo "Total versions: ${{ env.TOTAL_VERSIONS }}"
+          echo "Built: $BUILT_COUNT"
+          echo "Skipped: $SKIPPED_COUNT"
+          echo "Failed: $FAILED_COUNT"
+          cat build_results.txt
+
+      - name: Build single version
+        if: env.BUILD_MODE == 'single'
+        run: |
+          VERSION="${{ env.BUILD_VERSION }}"
+          echo "🚀 Building version: $VERSION"
+          
+          # Download the specific version
+          echo "📥 Downloading Augment VSIX version $VERSION..."
+          PUBLISHER="augment"
+          EXTENSION_NAME="vscode-augment"
+          VSIX_URL="https://marketplace.visualstudio.com/_apis/public/gallery/publishers/${PUBLISHER}/vsextensions/${EXTENSION_NAME}/${VERSION}/vspackage"
+          
+          curl -L --compressed -o original.vsix "$VSIX_URL"
+          
+          # Verify download
+          if [ ! -f "original.vsix" ]; then
+            echo "❌ Failed to download VSIX for version $VERSION"
+            exit 1
+          fi
+          
+          echo "✅ VSIX downloaded successfully for version $VERSION"
+          
+          # Extract VSIX
+          echo "📦 Extracting VSIX for version $VERSION..."
+          mkdir -p unpacked_ext
+          cd unpacked_ext
+          unzip -q ../original.vsix
+          cd ..
+          echo "✅ VSIX extracted for version $VERSION"
+          
+          # Get version from package.json
+          PKG_PATH=""
+          if [ -f "unpacked_ext/package.json" ]; then
+            PKG_PATH="unpacked_ext/package.json"
+          elif [ -f "unpacked_ext/extension/package.json" ]; then
+            PKG_PATH="unpacked_ext/extension/package.json"
+          else
+            echo "❌ package.json not found for version $VERSION"
+            exit 1
+          fi
+          
+          ACTUAL_VERSION=$(python3 -c "import json; print(json.load(open('$PKG_PATH'))['version'])")
+          if [ "$ACTUAL_VERSION" != "$VERSION" ]; then
+            echo "⚠️ Version mismatch: requested $VERSION but got $ACTUAL_VERSION"
+            VERSION=$ACTUAL_VERSION
+          fi
+          
+          # Check if version already released
+          git fetch --tags --force --quiet
+          TAG_NAME="v${VERSION}-triple"
+          if git tag -l | grep -q "^${TAG_NAME}$"; then
+            echo "✅ Tag ${TAG_NAME} already exists, skipping build for version $VERSION"
+            exit 0
+          fi
+          
+          echo "🔄 Tag ${TAG_NAME} does not exist, proceeding with build for version $VERSION"
+          
+          # Perform Triple Injection
+          echo "🚀 Performing triple injection for version $VERSION..."
+          
+          python3 << 'PYEOF'
+          import os, sys, shutil, json, re, stat
+          from pathlib import Path
+          from datetime import datetime
+
+          def log(msg):
+              print(f"[INFO] {msg}")
+
+          def error(msg):
+              print(f"[ERROR] {msg}")
+              sys.exit(1)
+
+          # Find extension.js file
+          def find_extension_js(base_dir):
+              candidates = [
+                  base_dir / 'extension' / 'out' / 'extension.js',
+                  base_dir / 'extension' / 'dist' / 'extension.js', 
+                  base_dir / 'out' / 'extension.js',
+                  base_dir / 'dist' / 'extension.js',
+                  base_dir / 'extension.js'
+              ]
+              
+              for candidate in candidates:
+                  if candidate.exists():
+                      return candidate, candidate.parent
+              return None, None
+
+          # Inject at head with proper formatting
+          def inject_head(js_file, inject_content, tag):
+              log(f"Injecting {tag} at head...")
+              content = js_file.read_text(encoding='utf-8')
+              
+              # Remove existing injection if present
+              pattern = rf"// === {re.escape(tag)} Start ===.*?// === {re.escape(tag)} End ===\s*"
+              content = re.sub(pattern, '', content, flags=re.DOTALL)
+              
+              # Create injection with proper formatting
+              timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+              injection = f"// === {tag} Start ===\n"
+              injection += f"// 注入时间: {timestamp}\n"
+              injection += f"// 注入版本: 1.0\n"
+              injection += "!function(){\n"
+              injection += '"use strict";\n'
+              injection += inject_content + "\n"
+              injection += "}();\n"
+              injection += f"// === {tag} End ===\n\n"
+              
+              js_file.write_text(injection + content, encoding='utf-8')
+              return True
+
+          # Inject at tail with proper formatting
+          def inject_tail(js_file, inject_content, tag):
+              log(f"Injecting {tag} at tail...")
+              content = js_file.read_text(encoding='utf-8')
+              
+              # Remove existing injection if present
+              pattern = rf"// === {re.escape(tag)} Start ===.*?// === {re.escape(tag)} End ===\s*"
+              content = re.sub(pattern, '', content, flags=re.DOTALL)
+              
+              # Create injection with proper formatting
+              timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+              injection = f"\n\n// === {tag} Start ===\n"
+              injection += f"// 注入时间: {timestamp}\n"
+              injection += "!function(){\n"
+              injection += '"use strict";\n'
+              injection += inject_content + "\n"
+              injection += "}();\n"
+              injection += f"// === {tag} End ==="
+              
+              js_file.write_text(content + injection, encoding='utf-8')
+              return True
+
+          try:
+              # Find extension.js
+              unpacked = Path('unpacked_ext')
+              js_path, js_dir = find_extension_js(unpacked)
+              
+              if not js_path:
+                  error("extension.js not found!")
+              
+              log(f"Found extension.js: {js_path}")
+              
+              # Fix file permissions
+              js_path.chmod(stat.S_IWRITE | stat.S_IREAD)
+              log("File permissions fixed")
+              
+              # Read injection files
+              resources = Path('resources')
+              interceptor_content = (resources / 'interceptor.js').read_text(encoding='utf-8')
+
+              # Prepare loader snippets
+              token_loader = """// Token登录增强模块注入（仅模块初始化）
+          !function(){
+          "use strict";
+          try {
+              const AugmentTokenLoginEnhanced = require('./token-login-enhanced.js');
+              if (typeof global !== 'undefined') {
+                  global.augmentTokenLoginInstance = new AugmentTokenLoginEnhanced();
+                  console.log('[TokenLogin] Global instance created successfully');
+              }
+          } catch (error) {
+              console.error('[TokenLogin] Module initialization failed:', error);
+          }
+          }();"""
+
+              balance_loader = """// 余额显示增强模块注入（仅模块初始化）
+          !function(){
+          "use strict";
+          try {
+              const AugmentBalanceEnhanced = require('./augment-balance-enhanced.js');
+              if (typeof global !== 'undefined') {
+                  global.augmentBalanceInstance = new AugmentBalanceEnhanced();
+                  console.log('[BalanceEnhanced] Global instance created successfully');
+              }
+          } catch (error) {
+              console.error('[BalanceEnhanced] Module initialization failed:', error);
+          }
+          }();"""
+
+              triple_exports_handler = """// 三重注入统一exports处理
+          !function(){
+          "use strict";
+          try {
+              const originalActivate = (typeof module !== 'undefined' && module.exports && module.exports.activate)
+                  ? module.exports.activate
+                  : (context) => {};
+              const originalDeactivate = (typeof module !== 'undefined' && module.exports && module.exports.deactivate)
+                  ? module.exports.deactivate
+                  : () => {};
+
+              async function tripleActivate(context) {
+                  try {
+                      if (typeof originalActivate === 'function') {
+                          await originalActivate(context);
+                      }
+                      if (typeof global !== 'undefined' && global.augmentTokenLoginInstance) {
+                          try {
+                              await global.augmentTokenLoginInstance.initialize(context);
+                          } catch (error) {
+                              console.error('[TripleInjection] Token login initialization failed:', error);
+                          }
+                      }
+                      if (typeof global !== 'undefined' && global.augmentBalanceInstance) {
+                          try {
+                              await global.augmentBalanceInstance.initialize(context);
+                          } catch (error) {
+                              console.error('[TripleInjection] Balance display initialization failed:', error);
+                          }
+                      }
+                  } catch (error) {
+                      console.error('[TripleInjection] Triple activation failed:', error);
+                      throw error;
+                  }
+              }
+
+              function tripleDeactivate() {
+                  try {
+                      if (typeof global !== 'undefined' && global.augmentBalanceInstance) {
+                          try {
+                              if (typeof global.augmentBalanceInstance.dispose === 'function') {
+                                  global.augmentBalanceInstance.dispose();
+                              }
+                          } catch (error) {
+                              console.error('[TripleInjection] Balance display disposal failed:', error);
+                          }
+                      }
+                      if (typeof global !== 'undefined' && global.augmentTokenLoginInstance) {
+                          try {
+                              if (typeof global.augmentTokenLoginInstance.dispose === 'function') {
+                                  global.augmentTokenLoginInstance.dispose();
+                              }
+                          } catch (error) {
+                              console.error('[TripleInjection] Token login disposal failed:', error);
+                          }
+                      }
+                      if (typeof originalDeactivate === 'function') {
+                          originalDeactivate();
+                      }
+                  } catch (error) {
+                      console.error('[TripleInjection] Triple deactivation failed:', error);
+                  }
+              }
+
+              if (typeof module !== 'undefined' && module.exports) {
+                  const newExports = {};
+                  for (const key in module.exports) {
+                      if (key !== 'activate' && key !== 'deactivate') {
+                          try {
+                              newExports[key] = module.exports[key];
+                          } catch (error) {
+                              console.warn(`[TripleInjection] Failed to copy property ${key}:`, error);
+                          }
+                      }
+                  }
+                  newExports.activate = tripleActivate;
+                  newExports.deactivate = tripleDeactivate;
+                  module.exports = newExports;
+              }
+          } catch (error) {
+              console.error('[TripleInjection] Triple exports handler failed:', error);
+          }
+          }();"""
+
+              # Copy module files
+              shutil.copy(resources / 'token-login-enhanced.js', js_dir / 'token-login-enhanced.js')
+              shutil.copy(resources / 'augment-balance-enhanced.js', js_dir / 'augment-balance-enhanced.js')
+              log("Module files copied")
+
+              # Perform injections
+              inject_head(js_path, interceptor_content, 'Augment Interceptor Injection')
+              inject_tail(js_path, token_loader, 'Augment Token Login Enhanced Injection')
+              inject_tail(js_path, balance_loader, 'Augment Balance Enhanced Injection')
+              inject_tail(js_path, triple_exports_handler, 'Augment Triple Exports Handler')
+
+              log("✅ Triple injection completed successfully")
+              
+          except Exception as e:
+              error(f"Injection failed: {e}")
+          PYEOF
+          
+          # Update package.json
+          echo "📝 Updating package.json commands for version $VERSION..."
+          
+          python3 << 'PYEOF'
+          import json
+          from pathlib import Path
+
+          def log(msg):
+              print(f"[INFO] {msg}")
+
+          try:
+              unpacked = Path('unpacked_ext')
+              pkg_candidates = [
+                  unpacked / 'extension' / 'package.json',
+                  unpacked / 'package.json'
+              ]
+
+              pkg_path = None
+              for candidate in pkg_candidates:
+                  if candidate.exists():
+                      pkg_path = candidate
+                      break
+
+              if not pkg_path:
+                  raise FileNotFoundError("package.json not found")
+
+              with open(pkg_path, 'r', encoding='utf-8') as f:
+                  pkg_data = json.load(f)
+
+              resources = Path('resources')
+
+              if 'contributes' not in pkg_data:
+                  pkg_data['contributes'] = {}
+              if 'commands' not in pkg_data['contributes']:
+                  pkg_data['contributes']['commands'] = []
+
+              # Update commands
+              if (resources / 'package-json-commands.json').exists():
+                  with open(resources / 'package-json-commands.json', 'r', encoding='utf-8') as f:
+                      pkg_commands = json.load(f)
+                  for cmd in pkg_commands.get('commands_to_add', []):
+                      exists = any(existing.get('command') == cmd.get('command')
+                                 for existing in pkg_data['contributes']['commands'])
+                      if not exists:
+                          pkg_data['contributes']['commands'].append(cmd)
+
+              if (resources / 'balance-package-commands.json').exists():
+                  with open(resources / 'balance-package-commands.json', 'r', encoding='utf-8') as f:
+                      balance_commands = json.load(f)
+                  for cmd in balance_commands.get('commands_to_add', []):
+                      exists = any(existing.get('command') == cmd.get('command')
+                                 for existing in pkg_data['contributes']['commands'])
+                      if not exists:
+                          pkg_data['contributes']['commands'].append(cmd)
+
+                  # Add configuration
+                  if 'configuration_to_add' in balance_commands:
+                      config = balance_commands['configuration_to_add']
+                      if 'configuration' not in pkg_data['contributes']:
+                          pkg_data['contributes']['configuration'] = []
+                      
+                      if isinstance(pkg_data['contributes']['configuration'], list):
+                          balance_config_exists = any(c.get('title') == 'Augment Balance' 
+                                                    for c in pkg_data['contributes']['configuration'])
+                          if not balance_config_exists:
+                              new_config = {
+                                  "title": config.get('title', 'Augment Balance'),
+                                  "properties": config.get('properties', {})
+                              }
+                              pkg_data['contributes']['configuration'].append(new_config)
+                      elif isinstance(pkg_data['contributes']['configuration'], dict):
+                          if 'properties' not in pkg_data['contributes']['configuration']:
+                              pkg_data['contributes']['configuration']['properties'] = {}
+                          for prop_name, prop_config in config.get('properties', {}).items():
+                              if prop_name not in pkg_data['contributes']['configuration']['properties']:
+                                  pkg_data['contributes']['configuration']['properties'][prop_name] = prop_config
+
+              with open(pkg_path, 'w', encoding='utf-8') as f:
+                  json.dump(pkg_data, f, indent=2, ensure_ascii=False)
+
+              log("✅ package.json updated successfully")
+
+          except Exception as e:
+              print(f"[ERROR] Failed to update package.json: {e}")
+              exit(1)
+          PYEOF
+          
+          # Merge README
+          echo "📄 Merging README for version $VERSION..."
+          
+          python3 << 'PYEOF'
+          from pathlib import Path
+
+          try:
+              unpacked = Path('unpacked_ext')
+              resources = Path('resources')
+
+              original_readme = None
+              readme_candidates = [
+                  unpacked / 'extension' / 'README.md',
+                  unpacked / 'README.md'
+              ]
+
+              for candidate in readme_candidates:
+                  if candidate.exists():
+                      original_readme = candidate
+                      break
+
+              custom_readme = resources / 'README.md'
+              if not custom_readme.exists():
+                  raise FileNotFoundError("Custom README.md not found in resources")
+
+              custom_content = custom_readme.read_text(encoding='utf-8')
+
+              if original_readme:
+                  original_content = original_readme.read_text(encoding='utf-8')
+                  merged_content = custom_content + "\n\n---\n\n# Original Extension Documentation\n\n" + original_content
+                  original_readme.write_text(merged_content, encoding='utf-8')
+              else:
+                  target_path = unpacked / 'README.md'
+                  target_path.write_text(custom_content, encoding='utf-8')
+
+          except Exception as e:
+              print(f"[ERROR] Failed to merge README: {e}")
+              exit(1)
+          PYEOF
+          
+          # Package VSIX
+          echo "📦 Packaging modified VSIX for version $VERSION..."
+          cd unpacked_ext
+          zip -r ../augment.vscode-augment-${VERSION}-triple.vsix . -x "*.DS_Store" "*.git*"
+          cd ..
+          echo "✅ VSIX packaged for version $VERSION"
+          
+          # Create Release
+          echo "🏷️ Creating release for version $VERSION..."
+          BUILD_DATE=$(date '+%Y-%m-%d %H:%M:%S')
+          
+          gh release create "v${VERSION}-triple" \
+            "augment.vscode-augment-${VERSION}-triple.vsix" \
+            --title "Augment VSCode Extension v${VERSION} (Triple Injected)" \
+            --notes "# Augment VSCode Extension v${VERSION} - Triple Injected Version
+
+            ## 🚀 Features
+            - **Triple Injection**: Interceptor + Token Login + Balance Enhanced
+            - **Session Management**: Advanced session handling and spoofing
+            - **Request Interception**: Comprehensive HTTP/HTTPS request modification
+            - **Balance Enhancement**: Enhanced balance display and management
+
+            ## 📥 Installation
+            1. Download the \`.vsix\` file from this release
+            2. Open VS Code
+            3. Go to Extensions (Ctrl+Shift+X)
+            4. Click the \"...\" menu and select \"Install from VSIX...\"
+            5. Select the downloaded file
+
+            ## 🔧 Technical Details
+            - **Base Version**: v${VERSION}
+            - **Injection Type**: Triple
+            - **Build Date**: ${BUILD_DATE}
+            - **Auto-built**: Yes (GitHub Actions)
+
+            ---
+            *This release was automatically generated from the marketplace version ${VERSION}.*" \
+            --draft=false \
+            --prerelease=false
+          
+          echo "✅ Release created for version $VERSION"
+
+      - name: Success notification
+        run: |
+          echo "🎉 Build and release completed successfully!"
+          if [ "${{ env.BUILD_MODE }}" = "all" ]; then
+            echo "📊 Build Summary:"
+            echo "  Total versions: ${{ env.TOTAL_VERSIONS }}"
+            echo "  Built: ${{ env.BUILT_COUNT }}"
+            echo "  Skipped: ${{ env.SKIPPED_COUNT }}"
+            echo "  Failed: ${{ env.FAILED_COUNT }}"
+          else
+            echo "📦 Built version: ${{ env.BUILD_VERSION }}"
+            echo "🏷️  Tag: v${{ env.BUILD_VERSION }}-triple"
+          fi

@@ -1,1 +1,881 @@
 
+name: Build Augment Injector Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '构建模式：latest（默认最新）、specific（指定版本）、all（全部版本）'
+        required: false
+        default: latest
+      target_version:
+        description: '指定版本号（当 mode=specific 时生效，例如 0.627.0）'
+        required: false
+      start_index:
+        description: '全量构建时的起始索引（默认 0，内部批次续跑使用）'
+        required: false
+        default: '0'
+  schedule:
+    - cron: '0 */2 * * *'
+
+jobs:
+  prepare-versions:
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.collect.outputs.mode }}
+      version_count: ${{ steps.collect.outputs.version_count }}
+      version_list: ${{ steps.collect.outputs.version_list }}
+    steps:
+      - name: 收集版本信息
+        id: collect
+        run: |
+          echo "🔄 正在从 VSCode 市场收集版本信息..."
+          python3 <<'PY'
+          import json
+          import os
+          import sys
+          from urllib import error, request
+
+          API_URL = 'https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery'
+          PAYLOAD = {
+              'filters': [
+                  {
+                      'criteria': [
+                          {'filterType': 7, 'value': 'Augment.vscode-augment'},
+                          {'filterType': 8, 'value': 'Microsoft.VisualStudio.Code'},
+                          {'filterType': 12, 'value': '4096'},
+                      ],
+                      'pageNumber': 1,
+                      'pageSize': 1,
+                      'sortBy': 0,
+                      'sortOrder': 0,
+                  }
+              ],
+              'assetTypes': [],
+              'flags': 55,
+          }
+          HEADERS = {
+              'Content-Type': 'application/json',
+              'Accept': 'application/json;api-version=3.0-preview.1',
+              'User-Agent': 'VSCode 1.105.1 (Code)',
+              'X-Market-Client-Id': 'VSCode 1.105.1',
+              'X-Market-User-Id': 'df23a44f-eb51-4249-86fa-d399f925367d',
+          }
+
+          MAX_MATRIX = 256
+
+          def fail(message: str) -> None:
+              print(f'[ERROR] {message}')
+              sys.exit(1)
+
+
+          target_version = (os.environ.get('INPUT_TARGET_VERSION') or '').strip()
+          mode_input = (os.environ.get('INPUT_MODE') or '').strip().lower()
+          start_index_raw = (os.environ.get('INPUT_START_INDEX') or '0').strip()
+          try:
+              start_index = int(start_index_raw or '0')
+          except ValueError:
+              fail(f'起始索引不是有效的整数: {start_index_raw!r}')
+          if start_index < 0:
+              print(f"[WARN] 起始索引 {start_index} 小于 0，将重置为 0")
+              start_index = 0
+          if not mode_input:
+              mode = 'specific' if target_version else 'latest'
+          else:
+              mode = mode_input
+
+          if mode not in {'latest', 'specific', 'all'}:
+              fail(f'不支持的构建模式: {mode}')
+
+          print(f'[INFO] 选择的构建模式: {mode}')
+          if mode == 'specific':
+              if not target_version:
+                  fail('mode 为 specific 时必须提供 target_version')
+              print(f'[INFO] 指定版本: {target_version}')
+
+          request_body = json.dumps(PAYLOAD).encode('utf-8')
+          req = request.Request(API_URL, data=request_body, headers=HEADERS, method='POST')
+          try:
+              with request.urlopen(req, timeout=30) as resp:
+                  raw = resp.read()
+          except error.HTTPError as exc:
+              fail(f'调用市场 API 失败: HTTP {exc.code}')
+          except error.URLError as exc:
+              fail(f'调用市场 API 失败: {exc.reason}')
+
+          try:
+              data = json.loads(raw)
+          except json.JSONDecodeError as exc:
+              fail(f'解析市场数据失败: {exc}')
+
+          try:
+              versions = data['results'][0]['extensions'][0]['versions']
+          except (KeyError, IndexError) as exc:
+              fail(f'无法解析版本信息: {exc}')
+
+          all_versions = [item.get('version') for item in versions if item.get('version')]
+          if not all_versions:
+              fail('未获取到任何版本号')
+
+          print(f'[INFO] 市场返回 {len(all_versions)} 个版本，最新版本为 {all_versions[0]}')
+          if mode == 'latest':
+              selected = [all_versions[0]]
+              start_index = 0
+          elif mode == 'specific':
+              if target_version not in all_versions:
+                  fail(f'指定版本 {target_version} 不存在于市场版本列表中')
+              selected = [target_version]
+              start_index = 0
+          else:
+              selected = all_versions
+
+          total_versions = len(selected)
+          if start_index >= total_versions:
+              subset = []
+          else:
+              subset = selected[start_index:start_index + MAX_MATRIX]
+
+          if subset:
+              preview = ', '.join(subset[:5])
+              if len(subset) > 5:
+                  preview += ', ...'
+              print(f'[INFO] 本次批次将构建 {len(subset)} 个版本，范围索引 {start_index} - {start_index + len(subset) - 1}')
+              print(f'[INFO] 预览: {preview}')
+          else:
+              print(f'[WARN] 起始索引 {start_index} 超出可用版本数量 {total_versions}，本批次不执行构建')
+
+          output_path = os.environ.get('GITHUB_OUTPUT')
+          if not output_path:
+              fail('GITHUB_OUTPUT 未设置')
+
+          next_start_index = start_index + len(subset)
+          has_more = next_start_index < total_versions
+
+          with open(output_path, 'a', encoding='utf-8') as handler:
+              handler.write(f'mode={mode}\n')
+              handler.write(f'version_count={len(subset)}\n')
+              handler.write('version_list=' + json.dumps(subset) + '\n')
+              handler.write(f'total_count={total_versions}\n')
+              handler.write(f'start_index={start_index}\n')
+              handler.write(f'next_start_index={next_start_index}\n')
+              handler.write(f'has_more={str(has_more).lower()}\n')
+          PY
+        env:
+          INPUT_MODE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.mode || '' }}
+          INPUT_TARGET_VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target_version || '' }}
+          INPUT_START_INDEX: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.start_index || '0' }}
+
+  build-and-release:
+    name: Build and Release (${{ matrix.version }})
+    needs: prepare-versions
+    if: ${{ needs.prepare-versions.outputs.version_count != '0' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.prepare-versions.outputs.version_list) }}
+    permissions:
+      contents: write
+    env:
+      TARGET_VERSION: ${{ matrix.version }}
+      BUILD_MODE: ${{ needs.prepare-versions.outputs.mode }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate resources
+        run: |
+          echo "🔍 Validating required resources..."
+          
+          # Check required JS files
+          for file in interceptor.js token-login-enhanced.js augment-balance-enhanced.js; do
+            if [ ! -f "resources/$file" ]; then
+              echo "❌ Missing required file: resources/$file"
+              exit 1
+            fi
+            echo "✅ Found: resources/$file"
+          done
+          
+          # Check required config files
+          for file in package-json-commands.json balance-package-commands.json README.md; do
+            if [ ! -f "resources/$file" ]; then
+              echo "❌ Missing required file: resources/$file"
+              exit 1
+            fi
+            echo "✅ Found: resources/$file"
+          done
+          
+          echo "✅ All required resources validated"
+
+      - name: Download VSIX
+        run: |
+          set -euo pipefail
+          if [ -z "${TARGET_VERSION:-}" ]; then
+            echo "❌ 未找到目标版本信息"
+            exit 1
+          fi
+          echo "📥 Downloading Augment VSIX for version ${TARGET_VERSION}..."
+          PUBLISHER="augment"
+          EXTENSION_NAME="vscode-augment"
+          VSIX_URL="https://marketplace.visualstudio.com/_apis/public/gallery/publishers/${PUBLISHER}/vsextensions/${EXTENSION_NAME}/${TARGET_VERSION}/vspackage"
+          
+          curl -L --compressed -o original.vsix "$VSIX_URL"
+          
+          # Verify download
+          if [ ! -f "original.vsix" ]; then
+            echo "❌ Failed to download VSIX"
+            exit 1
+          fi
+          
+          echo "✅ VSIX downloaded successfully"
+          file original.vsix || true
+
+      - name: Extract VSIX
+        run: |
+          echo "📦 Extracting VSIX..."
+          mkdir -p unpacked_ext
+          cd unpacked_ext
+          unzip -q ../original.vsix
+          cd ..
+          echo "✅ VSIX extracted"
+
+      - name: Get version from package.json
+        id: get_version
+        run: |
+          # Find package.json in unpacked extension
+          if [ -f "unpacked_ext/package.json" ]; then
+            PKG_PATH="unpacked_ext/package.json"
+          elif [ -f "unpacked_ext/extension/package.json" ]; then
+            PKG_PATH="unpacked_ext/extension/package.json"
+          else
+            echo "❌ package.json not found"
+            exit 1
+          fi
+          
+          VERSION=$(python3 -c "import json; print(json.load(open('$PKG_PATH'))['version'])")
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Found version: $VERSION"
+          if [ "$VERSION" != "${TARGET_VERSION}" ]; then
+            echo "❌ 解压后的版本号 ($VERSION) 与目标版本 (${TARGET_VERSION}) 不一致"
+            exit 1
+          fi
+          echo "✅ 版本号匹配目标版本"
+
+      - name: Check if version already released
+        id: version_check
+        run: |
+          git fetch --tags --force --quiet
+          TAG_NAME="v${{ env.VERSION }}-triple"
+          if git tag -l | grep -q "^${TAG_NAME}$"; then
+            echo "skip_build=true" >> $GITHUB_OUTPUT
+            echo "Tag ${TAG_NAME} already exists, skipping build"
+          else
+            echo "skip_build=false" >> $GITHUB_OUTPUT
+            echo "Tag ${TAG_NAME} does not exist, proceeding with build"
+          fi
+
+      - name: Skip build notification
+        if: steps.version_check.outputs.skip_build == 'true'
+        run: |
+          echo "✅ Version ${{ env.VERSION }} already released (triple). Skipping packaging and release."
+
+      - name: Perform Triple Injection
+        if: steps.version_check.outputs.skip_build == 'false'
+        run: |
+          echo "🚀 Performing triple injection..."
+          
+          python3 << 'EOF'
+          import os, sys, shutil, json, re, stat
+          from pathlib import Path
+          from datetime import datetime
+
+          def log(msg):
+              print(f"[INFO] {msg}")
+
+          def error(msg):
+              print(f"[ERROR] {msg}")
+              sys.exit(1)
+
+          # Find extension.js file
+          def find_extension_js(base_dir):
+              candidates = [
+                  base_dir / 'extension' / 'out' / 'extension.js',
+                  base_dir / 'extension' / 'dist' / 'extension.js', 
+                  base_dir / 'out' / 'extension.js',
+                  base_dir / 'dist' / 'extension.js',
+                  base_dir / 'extension.js'
+              ]
+              
+              for candidate in candidates:
+                  if candidate.exists():
+                      return candidate, candidate.parent
+              return None, None
+
+          # Inject at head with proper formatting (like local PowerShell script)
+          def inject_head(js_file, inject_content, tag):
+              log(f"Injecting {tag} at head...")
+              content = js_file.read_text(encoding='utf-8')
+              
+              # Remove existing injection if present
+              pattern = rf"// === {re.escape(tag)} Start ===.*?// === {re.escape(tag)} End ===\s*"
+              content = re.sub(pattern, '', content, flags=re.DOTALL)
+              
+              # Create injection with proper formatting (like PowerShell script)
+              timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+              env_file_path = os.environ.get('GITHUB_ENV')
+              if env_file_path:
+                  with open(env_file_path, 'a') as f:
+                      f.write(f"BUILD_DATE={timestamp}\n")
+                  log(f"✅ Build date set to: {timestamp}")
+              else:
+                  log("⚠️ GITHUB_ENV not found, build date will not be available.")
+              injection = f"// === {tag} Start ===\n"
+              injection += f"// 注入时间: {timestamp}\n"
+              injection += f"// 注入版本: 1.0\n"
+              injection += "!function(){\n"
+              injection += '"use strict";\n'
+              injection += inject_content + "\n"
+              injection += "}();\n"
+              injection += f"// === {tag} End ===\n\n"
+              
+              js_file.write_text(injection + content, encoding='utf-8')
+              return True
+
+          # Inject at tail with proper formatting
+          def inject_tail(js_file, inject_content, tag):
+              log(f"Injecting {tag} at tail...")
+              content = js_file.read_text(encoding='utf-8')
+              
+              # Remove existing injection if present
+              pattern = rf"// === {re.escape(tag)} Start ===.*?// === {re.escape(tag)} End ===\s*"
+              content = re.sub(pattern, '', content, flags=re.DOTALL)
+              
+              # Create injection with proper formatting
+              timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+              injection = f"\n\n// === {tag} Start ===\n"
+              injection += f"// 注入时间: {timestamp}\n"
+              injection += "!function(){\n"
+              injection += '"use strict";\n'
+              injection += inject_content + "\n"
+              injection += "}();\n"
+              injection += f"// === {tag} End ==="
+              
+              js_file.write_text(content + injection, encoding='utf-8')
+              return True
+
+          try:
+              # Find extension.js
+              unpacked = Path('unpacked_ext')
+              js_path, js_dir = find_extension_js(unpacked)
+              
+              if not js_path:
+                  error("extension.js not found!")
+              
+              log(f"Found extension.js: {js_path}")
+              
+              # Fix file permissions (files from ZIP might be read-only)
+              js_path.chmod(stat.S_IWRITE | stat.S_IREAD)
+              log("File permissions fixed")
+              
+              # Read injection files
+              resources = Path('resources')
+              interceptor_content = (resources / 'interceptor.js').read_text(encoding='utf-8')
+
+              # Prepare loader snippets (require + initialize) for tail injection
+              token_loader = """
+              // Token登录增强模块注入（仅模块初始化）
+              !function(){
+              "use strict";
+              try {
+                  const AugmentTokenLoginEnhanced = require('./token-login-enhanced.js');
+
+                  // 创建全局Token登录实例
+                  if (typeof global !== 'undefined') {
+                      global.augmentTokenLoginInstance = new AugmentTokenLoginEnhanced();
+                      console.log('[TokenLogin] Global instance created successfully');
+                  }
+              } catch (error) {
+                  console.error('[TokenLogin] Module initialization failed:', error);
+              }
+              }();
+              """.strip()
+
+              balance_loader = """
+              // 余额显示增强模块注入（仅模块初始化）
+              !function(){
+              "use strict";
+              try {
+                  const AugmentBalanceEnhanced = require('./augment-balance-enhanced.js');
+
+                  // 创建全局余额显示实例
+                  if (typeof global !== 'undefined') {
+                      global.augmentBalanceInstance = new AugmentBalanceEnhanced();
+                      console.log('[BalanceEnhanced] Global instance created successfully');
+                  }
+              } catch (error) {
+                  console.error('[BalanceEnhanced] Module initialization failed:', error);
+              }
+              }();
+              """.strip()
+
+              triple_exports_handler = """
+              // 三重注入统一exports处理
+              !function(){
+              "use strict";
+              try {
+                  // 保存原始的exports函数
+                  const originalActivate = (typeof module !== 'undefined' && module.exports && module.exports.activate)
+                      ? module.exports.activate
+                      : (context) => {};
+                  const originalDeactivate = (typeof module !== 'undefined' && module.exports && module.exports.deactivate)
+                      ? module.exports.deactivate
+                      : () => {};
+
+                  console.log('[TripleInjection] Original activate type:', typeof originalActivate);
+                  console.log('[TripleInjection] Original deactivate type:', typeof originalDeactivate);
+
+                  // 创建三重组合的activate函数
+                  async function tripleActivate(context) {
+                      try {
+                          console.log('[TripleInjection] Starting triple activation...');
+
+                          // 1. 调用原始activate函数
+                          if (typeof originalActivate === 'function') {
+                              await originalActivate(context);
+                              console.log('[TripleInjection] Original activate completed');
+                          }
+
+                          // 2. 初始化Token登录功能
+                          if (typeof global !== 'undefined' && global.augmentTokenLoginInstance) {
+                              try {
+                                  await global.augmentTokenLoginInstance.initialize(context);
+                                  console.log('[TripleInjection] Token login initialized');
+                              } catch (error) {
+                                  console.error('[TripleInjection] Token login initialization failed:', error);
+                              }
+                          }
+
+                          // 3. 初始化余额显示功能
+                          if (typeof global !== 'undefined' && global.augmentBalanceInstance) {
+                              try {
+                                  await global.augmentBalanceInstance.initialize(context);
+                                  console.log('[TripleInjection] Balance display initialized');
+                              } catch (error) {
+                                  console.error('[TripleInjection] Balance display initialization failed:', error);
+                              }
+                          }
+
+                          console.log('[TripleInjection] Triple activation completed successfully');
+                      } catch (error) {
+                          console.error('[TripleInjection] Triple activation failed:', error);
+                          throw error;
+                      }
+                  }
+
+                  // 创建三重组合的deactivate函数
+                  function tripleDeactivate() {
+                      try {
+                          console.log('[TripleInjection] Starting triple deactivation...');
+
+                          // 1. 清理余额显示功能
+                          if (typeof global !== 'undefined' && global.augmentBalanceInstance) {
+                              try {
+                                  if (typeof global.augmentBalanceInstance.dispose === 'function') {
+                                      global.augmentBalanceInstance.dispose();
+                                      console.log('[TripleInjection] Balance display disposed');
+                                  }
+                              } catch (error) {
+                                  console.error('[TripleInjection] Balance display disposal failed:', error);
+                              }
+                          }
+
+                          // 2. 清理Token登录功能
+                          if (typeof global !== 'undefined' && global.augmentTokenLoginInstance) {
+                              try {
+                                  if (typeof global.augmentTokenLoginInstance.dispose === 'function') {
+                                      global.augmentTokenLoginInstance.dispose();
+                                      console.log('[TripleInjection] Token login disposed');
+                                  }
+                              } catch (error) {
+                                  console.error('[TripleInjection] Token login disposal failed:', error);
+                              }
+                          }
+
+                          // 3. 调用原始deactivate函数
+                          if (typeof originalDeactivate === 'function') {
+                              originalDeactivate();
+                              console.log('[TripleInjection] Original deactivate completed');
+                          }
+
+                          console.log('[TripleInjection] Triple deactivation completed successfully');
+                      } catch (error) {
+                          console.error('[TripleInjection] Triple deactivation failed:', error);
+                      }
+                  }
+
+                  // 安全地更新module.exports
+                  if (typeof module !== 'undefined' && module.exports) {
+                      // 不直接赋值，而是创建新的exports对象
+                      const newExports = {};
+
+                      // 复制原有属性
+                      for (const key in module.exports) {
+                          if (key !== 'activate' && key !== 'deactivate') {
+                              try {
+                                  newExports[key] = module.exports[key];
+                              } catch (error) {
+                                  console.warn(`[TripleInjection] Failed to copy property ${key}:`, error);
+                              }
+                          }
+                      }
+
+                      // 设置新的activate和deactivate
+                      newExports.activate = tripleActivate;
+                      newExports.deactivate = tripleDeactivate;
+
+                      // 替换整个module.exports对象
+                      module.exports = newExports;
+                      console.log('[TripleInjection] Module exports replaced successfully');
+                  } else {
+                      console.warn('[TripleInjection] module.exports not available');
+                  }
+              } catch (error) {
+                  console.error('[TripleInjection] Triple exports handler failed:', error);
+              }
+              }();
+              """.strip()
+
+              # Copy module files to extension directory
+              shutil.copy(resources / 'token-login-enhanced.js', js_dir / 'token-login-enhanced.js')
+              shutil.copy(resources / 'augment-balance-enhanced.js', js_dir / 'augment-balance-enhanced.js')
+              log("Module files copied")
+
+              # Perform triple injection (head: interceptor; tail: loaders; tail: exports handler)
+              inject_head(js_path, interceptor_content, 'Augment Interceptor Injection')
+              inject_tail(js_path, token_loader, 'Augment Token Login Enhanced Injection')
+              inject_tail(js_path, balance_loader, 'Augment Balance Enhanced Injection')
+              inject_tail(js_path, triple_exports_handler, 'Augment Triple Exports Handler')
+
+              log("✅ Triple injection completed successfully")
+              
+          except Exception as e:
+              error(f"Injection failed: {e}")
+          EOF
+
+      - name: Update package.json commands
+        if: steps.version_check.outputs.skip_build == 'false'
+        run: |
+          echo "📝 Updating package.json commands..."
+
+          python3 << 'EOF'
+          import json
+          from pathlib import Path
+
+          def log(msg):
+              print(f"[INFO] {msg}")
+
+          try:
+              # Find package.json
+              unpacked = Path('unpacked_ext')
+              pkg_candidates = [
+                  unpacked / 'extension' / 'package.json',
+                  unpacked / 'package.json'
+              ]
+
+              pkg_path = None
+              for candidate in pkg_candidates:
+                  if candidate.exists():
+                      pkg_path = candidate
+                      break
+
+              if not pkg_path:
+                  raise FileNotFoundError("package.json not found")
+
+              log(f"Found package.json: {pkg_path}")
+
+              # Load package.json
+              with open(pkg_path, 'r', encoding='utf-8') as f:
+                  pkg_data = json.load(f)
+
+              log(f"Original package.json version: {pkg_data.get('version', 'unknown')}")
+              log(f"Original commands count: {len(pkg_data.get('contributes', {}).get('commands', []))}")
+
+              # Load command updates
+              resources = Path('resources')
+
+              # Ensure contributes structure exists
+              if 'contributes' not in pkg_data:
+                  pkg_data['contributes'] = {}
+                  log("Created contributes section")
+              if 'commands' not in pkg_data['contributes']:
+                  pkg_data['contributes']['commands'] = []
+                  log("Created commands section")
+
+              # Update package.json commands
+              if (resources / 'package-json-commands.json').exists():
+                  with open(resources / 'package-json-commands.json', 'r', encoding='utf-8') as f:
+                      pkg_commands = json.load(f)
+
+                  log(f"Loaded package-json-commands.json: {list(pkg_commands.keys())}")
+
+                  # Add new commands (correct key name)
+                  added_count = 0
+                  for cmd in pkg_commands.get('commands_to_add', []):
+                      # Check if command already exists
+                      exists = any(existing.get('command') == cmd.get('command')
+                                 for existing in pkg_data['contributes']['commands'])
+                      if not exists:
+                          pkg_data['contributes']['commands'].append(cmd)
+                          log(f"Added command: {cmd.get('command', 'unknown')} - {cmd.get('title', 'No title')}")
+                          added_count += 1
+                      else:
+                          log(f"Command already exists: {cmd.get('command', 'unknown')}")
+
+                  log(f"Added {added_count} package.json commands")
+              else:
+                  log("package-json-commands.json not found, skipping")
+
+              # Update balance package commands
+              if (resources / 'balance-package-commands.json').exists():
+                  with open(resources / 'balance-package-commands.json', 'r', encoding='utf-8') as f:
+                      balance_commands = json.load(f)
+
+                  log(f"Loaded balance-package-commands.json: {list(balance_commands.keys())}")
+
+                  # Add balance commands (correct key name)
+                  added_count = 0
+                  for cmd in balance_commands.get('commands_to_add', []):
+                      exists = any(existing.get('command') == cmd.get('command')
+                                 for existing in pkg_data['contributes']['commands'])
+                      if not exists:
+                          pkg_data['contributes']['commands'].append(cmd)
+                          log(f"Added balance command: {cmd.get('command', 'unknown')} - {cmd.get('title', 'No title')}")
+                          added_count += 1
+                      else:
+                          log(f"Balance command already exists: {cmd.get('command', 'unknown')}")
+
+                  log(f"Added {added_count} balance commands")
+
+                  # Also add configuration if present
+                  if 'configuration_to_add' in balance_commands:
+                      try:
+                          config = balance_commands['configuration_to_add']
+                          log(f"Configuration structure: {list(config.keys())}")
+
+                          # Check existing configuration structure
+                          if 'configuration' in pkg_data['contributes']:
+                              log(f"Existing configuration type: {type(pkg_data['contributes']['configuration'])}")
+
+                              if isinstance(pkg_data['contributes']['configuration'], list):
+                                  log("Configuration is a list - adding new configuration object to array")
+
+                                  # Check if Augment Balance configuration already exists
+                                  balance_config_exists = False
+                                  for existing_config in pkg_data['contributes']['configuration']:
+                                      if existing_config.get('title') == 'Augment Balance':
+                                          log("Augment Balance configuration already exists in array")
+                                          balance_config_exists = True
+                                          break
+
+                                  if not balance_config_exists:
+                                      # Add new configuration object to the array
+                                      new_config = {
+                                          "title": config.get('title', 'Augment Balance'),
+                                          "properties": config.get('properties', {})
+                                      }
+                                      pkg_data['contributes']['configuration'].append(new_config)
+                                      log(f"Added new configuration object: {config.get('title', 'Augment Balance')}")
+                                      log(f"Added {len(config.get('properties', {}))} configuration properties")
+
+                              elif isinstance(pkg_data['contributes']['configuration'], dict):
+                                  log("Configuration is a dict - merging properties")
+
+                                  # Ensure properties exist
+                                  if 'properties' not in pkg_data['contributes']['configuration']:
+                                      pkg_data['contributes']['configuration']['properties'] = {}
+
+                                  # Merge properties
+                                  added_configs = 0
+                                  for prop_name, prop_config in config.get('properties', {}).items():
+                                      if prop_name not in pkg_data['contributes']['configuration']['properties']:
+                                          pkg_data['contributes']['configuration']['properties'][prop_name] = prop_config
+                                          log(f"Added configuration property: {prop_name}")
+                                          added_configs += 1
+                                      else:
+                                          log(f"Configuration property already exists: {prop_name}")
+
+                                  log(f"Added {added_configs} configuration properties to existing dict")
+
+                              else:
+                                  log("Configuration is neither dict nor list, creating new array")
+                                  pkg_data['contributes']['configuration'] = [
+                                      {
+                                          "title": config.get('title', 'Augment Balance'),
+                                          "properties": config.get('properties', {})
+                                      }
+                                  ]
+                                  log("Created new configuration array with Augment Balance")
+
+                          else:
+                              log("Creating new configuration array")
+                              pkg_data['contributes']['configuration'] = [
+                                  {
+                                      "title": config.get('title', 'Augment Balance'),
+                                      "properties": config.get('properties', {})
+                                  }
+                              ]
+                              log("Created new configuration array")
+
+                      except Exception as config_error:
+                          log(f"Error adding configuration: {config_error}")
+                          import traceback
+                          log(f"Traceback: {traceback.format_exc()}")
+                          log("Skipping configuration addition")
+              else:
+                  log("balance-package-commands.json not found, skipping")
+
+              # Save updated package.json with proper formatting
+              with open(pkg_path, 'w', encoding='utf-8') as f:
+                  json.dump(pkg_data, f, indent=2, ensure_ascii=False)
+
+              log(f"Final commands count: {len(pkg_data['contributes']['commands'])}")
+              log("✅ package.json commands updated successfully")
+
+          except Exception as e:
+              print(f"[ERROR] Failed to update package.json: {e}")
+              exit(1)
+          EOF
+
+      - name: Merge README
+        if: steps.version_check.outputs.skip_build == 'false'
+        run: |
+          echo "📄 Merging README..."
+
+          python3 << 'EOF'
+          from pathlib import Path
+
+          def log(msg):
+              print(f"[INFO] {msg}")
+
+          try:
+              unpacked = Path('unpacked_ext')
+              resources = Path('resources')
+
+              # Find original README.md
+              original_readme = None
+              readme_candidates = [
+                  unpacked / 'extension' / 'README.md',
+                  unpacked / 'README.md'
+              ]
+
+              for candidate in readme_candidates:
+                  if candidate.exists():
+                      original_readme = candidate
+                      break
+
+              # Read our custom README content
+              custom_readme = resources / 'README.md'
+              if not custom_readme.exists():
+                  raise FileNotFoundError("Custom README.md not found in resources")
+
+              custom_content = custom_readme.read_text(encoding='utf-8')
+
+              if original_readme:
+                  log(f"Found original README: {original_readme}")
+                  original_content = original_readme.read_text(encoding='utf-8')
+
+                  # Merge: custom content + separator + original content
+                  merged_content = custom_content + "\n\n---\n\n# Original Extension Documentation\n\n" + original_content
+
+                  # Write merged content back
+                  original_readme.write_text(merged_content, encoding='utf-8')
+                  log("✅ README merged successfully")
+              else:
+                  # No original README found, create new one
+                  target_path = unpacked / 'README.md'
+                  target_path.write_text(custom_content, encoding='utf-8')
+                  log("✅ New README created")
+
+          except Exception as e:
+              print(f"[ERROR] Failed to merge README: {e}")
+              exit(1)
+          EOF
+
+      - name: Package VSIX
+        if: steps.version_check.outputs.skip_build == 'false'
+        run: |
+          echo "📦 Packaging modified VSIX..."
+          cd unpacked_ext
+          zip -r ../augment.vscode-augment-${{ env.VERSION }}-triple.vsix . -x "*.DS_Store" "*.git*"
+          cd ..
+          echo "✅ VSIX packaged"
+
+      - name: Create Release
+        if: steps.version_check.outputs.skip_build == 'false'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ env.VERSION }}-triple
+          name: Augment VSCode Extension v${{ env.VERSION }} (Triple Injected)
+          body: |
+            # Augment VSCode Extension v${{ env.VERSION }} - Triple Injected Version
+
+            ## 🚀 Features
+            - **Triple Injection**: Interceptor + Token Login + Balance Enhanced
+            - **Session Management**: Advanced session handling and spoofing
+            - **Request Interception**: Comprehensive HTTP/HTTPS request modification
+            - **Balance Enhancement**: Enhanced balance display and management
+
+            ## 📥 Installation
+            1. Download the `.vsix` file from this release
+            2. Open VS Code
+            3. Go to Extensions (Ctrl+Shift+X)
+            4. Click the "..." menu and select "Install from VSIX..."
+            5. Select the downloaded file
+
+            ## 🔧 Technical Details
+            - **Base Version**: v${{ env.VERSION }}
+            - **Injection Type**: Triple
+            - **Build Date**: ${{ env.BUILD_DATE }}
+            - **Auto-built**: Yes (GitHub Actions)
+
+            ---
+            *This release was automatically generated from the latest marketplace version.*
+          files: |
+            augment.vscode-augment-${{ env.VERSION }}-triple.vsix
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Success notification
+        if: steps.version_check.outputs.skip_build == 'false'
+        run: |
+          echo "🎉 Build and release completed successfully!"
+          echo "📦 Released: augment.vscode-augment-${{ env.VERSION }}-triple.vsix"
+          echo "🏷️  Tag: v${{ env.VERSION }}-triple"
+
+  queue-next-batch:
+    needs:
+      - prepare-versions
+      - build-and-release
+    if: ${{ needs.prepare-versions.outputs.has_more == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Trigger next batch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NEXT_START=${{ needs.prepare-versions.outputs.next_start_index }}
+          TOTAL=${{ needs.prepare-versions.outputs.total_count }}
+          echo "➡️  当前批次已处理至索引 ${NEXT_START}，总计 ${TOTAL} 个版本。触发下一批次..."
+          gh workflow run "${{ github.workflow }}" \
+            --ref "${{ github.ref_name }}" \
+            -f mode=${{ needs.prepare-versions.outputs.mode }} \
+            -f target_version= \
+            -f start_index=${{ needs.prepare-versions.outputs.next_start_index }}
