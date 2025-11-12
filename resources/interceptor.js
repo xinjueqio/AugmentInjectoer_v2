@@ -1,19 +1,115 @@
 /**
  * 网络拦截器 - 核心风控绕过模块
  * 基于官方 v0.633.0 分析 + AugmentInjectoer_release1 解密
- * 
+ *
  * 功能:
- * 1. Session ID 替换
- * 2. Machine ID 伪造
- * 3. Feature Vector 替换
- * 4. Conversation ID 替换
- * 5. 硬件标识符伪造
- * 6. Git 输出隐藏
- * 7. 保留聊天上下文 (不清除 Blob 数据)
+ * 1. URI 深链接拦截 (支持 /autoAuth 和 /push-login)
+ * 2. Session ID 替换
+ * 3. Machine ID 伪造
+ * 4. Feature Vector 替换
+ * 5. Conversation ID 替换
+ * 6. 硬件标识符伪造
+ * 7. Git 输出隐藏
+ * 8. 保留聊天上下文 (不清除 Blob 数据)
  */
 
 (function() {
   'use strict';
+
+  // ==================== URI 深链接拦截器 ====================
+
+  try {
+    const vscode = require('vscode');
+
+    if (vscode && vscode.window && typeof vscode.window.registerUriHandler === 'function') {
+      // 保存原始的 registerUriHandler
+      const originalRegisterUriHandler = vscode.window.registerUriHandler.bind(vscode.window);
+
+      // 自定义 URI 处理器（由 token-login-enhanced.js 设置）
+      let customUriHandler = null;
+
+      /**
+       * 检查 URI 路径是否为认证相关路径
+       */
+      function isAuthPath(uri) {
+        try {
+          const path = uri && (uri.path || '');
+          return (
+            path === '/autoAuth' ||
+            path === 'autoAuth' ||
+            path === '/push-login' ||
+            path === 'push-login' ||
+            path === '/autoAuth/push-login' ||
+            path === 'autoAuth/push-login'
+          );
+        } catch (e) {
+          return false;
+        }
+      }
+
+      /**
+       * 拦截 registerUriHandler，支持自定义处理器优先级
+       */
+      vscode.window.registerUriHandler = function(handler) {
+        const wrappedHandler = {
+          handleUri: async (uri) => {
+            // 优先使用自定义处理器处理认证路径
+            try {
+              if (customUriHandler && isAuthPath(uri)) {
+                return await customUriHandler(uri);
+              }
+            } catch (error) {
+              try {
+                console.warn('[AugmentCompositeUri] Custom handler failed:', error);
+              } catch (e) {}
+            }
+
+            // 否则使用原始处理器
+            try {
+              return handler && typeof handler.handleUri === 'function'
+                ? handler.handleUri(uri)
+                : undefined;
+            } catch (error) {
+              try {
+                console.warn('[AugmentCompositeUri] Delegate handler failed:', error);
+              } catch (e) {}
+            }
+          }
+        };
+
+        return originalRegisterUriHandler(wrappedHandler);
+      };
+
+      // 暴露全局接口供 token-login-enhanced.js 使用
+      const globalObj = typeof globalThis !== 'undefined' ? globalThis :
+                       (typeof global !== 'undefined' ? global : {});
+
+      if (globalObj) {
+        globalObj.Augment = globalObj.Augment || {};
+
+        /**
+         * 设置自定义 URI 处理器
+         */
+        globalObj.Augment.setUriHandler = function(handler) {
+          if (typeof handler === 'function') {
+            customUriHandler = handler;
+            console.log('[AugmentCompositeUri] Custom URI handler registered');
+          }
+        };
+
+        /**
+         * 获取当前自定义 URI 处理器
+         */
+        globalObj.Augment.getUriHandler = function() {
+          return customUriHandler;
+        };
+      }
+
+      console.log('[AugmentCompositeUri] URI interceptor initialized');
+    }
+  } catch (error) {
+    console.error('[AugmentCompositeUri] Failed to initialize URI interceptor:', error);
+  }
 
   // ==================== 全局变量 ====================
   
