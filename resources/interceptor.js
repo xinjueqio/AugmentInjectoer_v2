@@ -281,18 +281,24 @@
    * 初始化拦截器
    */
   function initializeInterceptors() {
+    console.log('[AugmentInterceptor] ========== Initializing Interceptors ==========');
     for (const [name, config] of Object.entries(interceptorConfigs)) {
       if (config.enabled) {
         const handler = interceptorHandlers[name];
         if (handler) {
           interceptorMap.set(name, handler);
-          console.log(`[AugmentInterceptor] Registered interceptor: ${name} - ${config.description}`);
+          console.log(`[AugmentInterceptor] ✅ Registered: ${name} - ${config.description}`);
         }
+      } else {
+        console.log(`[AugmentInterceptor] ⏭️  Skipped: ${name} - ${config.description}`);
       }
     }
+    console.log(`[AugmentInterceptor] Total registered: ${interceptorMap.size} interceptors`);
+    console.log('[AugmentInterceptor] ========================================');
   }
 
   // 初始化拦截器
+  console.log('[AugmentInterceptor] Loading interceptor module...');
   initializeInterceptors();
 
   // ==================== 工具函数 ====================
