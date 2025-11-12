@@ -49,6 +49,9 @@ class AugmentTokenLoginEnhanced {
       // 设置 Token 注入
       this.setupTokenInjection();
 
+      // ✅ 新增: 启动时恢复 Token 和 Session
+      await this.restoreTokenOnStartup();
+
       // 注册深链接处理器
       try {
         this.registerDeepLinkHandler();
@@ -397,6 +400,39 @@ class AugmentTokenLoginEnhanced {
     } catch (error) {
       this.logger.error('Failed to update sessions data:', error);
       return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * ✅ 启动时恢复 Token 和 Session
+   * 从 Secret Storage 读取已保存的 Token,并更新拦截器的 Session ID
+   */
+  async restoreTokenOnStartup() {
+    try {
+      this.logger.info('Attempting to restore token on startup...');
+
+      // 1. 从 Secret Storage 读取 Token
+      const tokenData = await this.getAccessToken();
+
+      if (tokenData.success && tokenData.accessToken) {
+        this.logger.info('✅ Found stored token, restoring session...');
+        this.logger.info('Tenant URL: ' + tokenData.tenantURL);
+
+        // 2. 更新拦截器的 Session ID
+        const sessionUpdated = await this.updateInterceptorSessionId();
+
+        if (sessionUpdated) {
+          this.logger.info('✅ Token and session restored successfully');
+          this.logger.info('You are logged in and ready to use Augment');
+        } else {
+          this.logger.warn('⚠️ Token found but session update failed');
+        }
+      } else {
+        this.logger.info('ℹ️ No stored token found - please login first');
+      }
+    } catch (error) {
+      this.logger.error('Failed to restore token on startup:', error);
+      // 不抛出错误,允许扩展继续初始化
     }
   }
 
