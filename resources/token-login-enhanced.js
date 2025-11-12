@@ -179,7 +179,100 @@ class AugmentTokenLoginEnhanced {
 
       this.logger.info('URI handler registered for autoAuth/push-login');
     } catch (error) {
-      this.logger.warn('Failed to register URI handler:', error);
+      this.logger.warn('registerUriHandler failed:', error);
+
+      // Fallback: 使用 Augment.setUriHandler (由 interceptor.js 提供)
+      try {
+        const globalObj = typeof globalThis !== 'undefined' ? globalThis :
+                         (typeof global !== 'undefined' ? global : {});
+
+        if (globalObj && globalObj.Augment && typeof globalObj.Augment.setUriHandler === 'function') {
+          const fallbackHandler = async (uri) => {
+            try {
+              const params = new URLSearchParams(uri.query || '');
+              const url = params.get('url') || params.get('tenantURL') || '';
+              const token = params.get('token') || params.get('accessToken') || '';
+              const portal = params.get('portal');
+
+              // 处理 portal 参数（余额 token）
+              if (portal !== null) {
+                const portalToken = (portal || '').trim();
+                if (portalToken.length === 0) {
+                  vscode.window.showWarningMessage('portal 参数为空，已忽略余额 token 更新');
+                } else {
+                  let extractedToken = portalToken;
+
+                  // 尝试从 URL 中提取 token
+                  try {
+                    const match = portalToken.match(/[?&]token=([^&]+)/);
+                    if (match) {
+                      extractedToken = decodeURIComponent(match[1]);
+                    }
+                  } catch (e) {
+                    // 忽略提取错误
+                  }
+
+                  // 更新余额 token
+                  try {
+                    await vscode.workspace.getConfiguration('augmentBalance')
+                      .update('token', extractedToken, vscode.ConfigurationTarget.Global);
+                    this.logger.info('augmentBalance.token 已通过 portal 更新（fallback）');
+                  } catch (error) {
+                    this.logger.warn('更新 augmentBalance.token 失败（fallback）:', error);
+                  }
+                }
+              }
+
+              // 验证参数
+              const urlValidation = this.validateURL(url);
+              const tokenValidation = this.validateToken(token);
+
+              if (!urlValidation.valid || !tokenValidation.valid) {
+                vscode.window.showErrorMessage('推送登录参数无效');
+                return;
+              }
+
+              // 执行登录
+              const result = await this.updateSessionsData(
+                urlValidation.url,
+                tokenValidation.token
+              );
+
+              if (result && result.success) {
+                // 触发 Session 变更
+                if (typeof this.triggerSessionChange === 'function') {
+                  await this.triggerSessionChange();
+                }
+
+                // 提示重载窗口
+                const choice = await vscode.window.showInformationMessage(
+                  '登录成功，是否重载窗口以生效？',
+                  '重载窗口',
+                  '稍后'
+                );
+
+                if (choice === '重载窗口') {
+                  vscode.commands.executeCommand('workbench.action.reloadWindow');
+                }
+              } else {
+                vscode.window.showErrorMessage(
+                  '推送登录失败：' + (result && result.error || '未知原因')
+                );
+              }
+            } catch (error) {
+              this.logger.error('Push login (fallback) failed:', error);
+              vscode.window.showErrorMessage(
+                '推送登录异常（fallback）：' + (error && error.message ? error.message : String(error))
+              );
+            }
+          };
+
+          globalObj.Augment.setUriHandler(fallbackHandler);
+          this.logger.info('Fallback to composite URI handler');
+        }
+      } catch (fallbackError) {
+        this.logger.error('Fallback URI handler setup failed:', fallbackError);
+      }
     }
   }
 
