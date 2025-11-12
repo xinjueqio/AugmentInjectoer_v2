@@ -110,37 +110,179 @@
   }
 
   // ==================== 全局变量 ====================
-  
+
   // 伪造的 Session ID
   let FAKE_SESSION_ID = generateUUID();
-  
+
   // Conversation ID 映射表
   const conversationIdMap = new Map();
-  
+
+  // 拦截器映射表
+  const interceptorMap = new Map();
+
   // 伪造的硬件标识符
   const FAKE_IDENTIFIERS = {
     // macOS
     uuid: generateUUID(),
-    serialNumber: 'C02' + Array.from({ length: 8 }, () => 
+    serialNumber: 'C02' + Array.from({ length: 8 }, () =>
       'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[Math.floor(Math.random() * 36)]
     ).join(''),
-    macAddress: '00:' + Array.from({ length: 16 }, () => 
+    macAddress: '00:' + Array.from({ length: 16 }, () =>
       '0123456789ABCDEF'[Math.floor(Math.random() * 16)]
     ).join(''),
-    
+
     // Windows
-    windowsGuid: '{' + [8, 4, 4, 4, 12].map(len => 
-      Array.from({ length: len }, () => 
+    windowsGuid: '{' + [8, 4, 4, 4, 12].map(len =>
+      Array.from({ length: len }, () =>
         '0123456789abcdef'[Math.floor(Math.random() * 16)]
       ).join('')
     ).join('-') + '}',
-    productId: Array.from({ length: 20 }, () => 
+    productId: Array.from({ length: 20 }, () =>
       'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[Math.floor(Math.random() * 36)]
     ).join(''),
-    windowsSerial: Array.from({ length: 10 }, () => 
+    windowsSerial: Array.from({ length: 10 }, () =>
       'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[Math.floor(Math.random() * 36)]
     ).join('')
   };
+
+  // ==================== 拦截器配置 ====================
+
+  /**
+   * 拦截器配置
+   */
+  const interceptorConfigs = {
+    'chat-stream': {
+      enabled: true,
+      description: '聊天流端点拦截器 (保留 Blob 数据)',
+    },
+    'record-request-events': {
+      enabled: true,
+      description: '请求事件记录端点拦截器',
+    },
+    'report-feature-vector': {
+      enabled: true,
+      description: '特征向量报告端点拦截器',
+    },
+  };
+
+  /**
+   * 拦截器处理器
+   */
+  const interceptorHandlers = {
+    'chat-stream': {
+      shouldIntercept: function(url) {
+        return typeof url === 'string' && url.includes('/chat-stream');
+      },
+      processRequest: function(requestData) {
+        try {
+          let body = requestData.body || requestData.data;
+          if (!body) {
+            return { modified: false };
+          }
+
+          if (typeof body === 'string') {
+            try {
+              body = JSON.parse(body);
+            } catch (e) {
+              return { modified: false };
+            }
+          }
+
+          // ✅ v2 保留 Blob 数据 (不清除 added_blobs 和 deleted_blobs)
+          // 这样可以保持完整的聊天上下文和文件上下文
+          // release1 会清除这些数据导致上下文丢失
+
+          // 不做任何修改，直接返回
+          return { modified: false };
+        } catch (error) {
+          return { modified: false };
+        }
+      },
+      isSpecial: true,
+    },
+    'record-request-events': {
+      shouldIntercept: function(url) {
+        return typeof url === 'string' && url.includes('record-request-events');
+      },
+      processRequest: function(requestData) {
+        try {
+          let body = requestData.body || requestData.data;
+          if (!body) {
+            return { modified: false };
+          }
+
+          if (typeof body === 'string') {
+            try {
+              body = JSON.parse(body);
+            } catch (e) {
+              return { modified: false };
+            }
+          }
+
+          // 替换 Conversation ID
+          const modifiedBody = replaceConversationIds(body);
+          return {
+            modified: true,
+            body: JSON.stringify(modifiedBody),
+            data: JSON.stringify(modifiedBody),
+          };
+        } catch (error) {
+          return { modified: false };
+        }
+      },
+      isSpecial: true,
+    },
+    'report-feature-vector': {
+      shouldIntercept: function(url) {
+        return typeof url === 'string' && url.includes('report-feature-vector');
+      },
+      processRequest: function(requestData) {
+        try {
+          let body = requestData.body || requestData.data;
+          if (!body) {
+            return { modified: false };
+          }
+
+          if (typeof body === 'string') {
+            try {
+              body = JSON.parse(body);
+            } catch (e) {
+              return { modified: false };
+            }
+          }
+
+          // 替换 Feature Vector
+          const modifiedBody = replaceFeatureVectors(body);
+          return {
+            modified: true,
+            body: JSON.stringify(modifiedBody),
+            data: JSON.stringify(modifiedBody),
+          };
+        } catch (error) {
+          return { modified: false };
+        }
+      },
+      isSpecial: true,
+    },
+  };
+
+  /**
+   * 初始化拦截器
+   */
+  function initializeInterceptors() {
+    for (const [name, config] of Object.entries(interceptorConfigs)) {
+      if (config.enabled) {
+        const handler = interceptorHandlers[name];
+        if (handler) {
+          interceptorMap.set(name, handler);
+          console.log(`[AugmentInterceptor] Registered interceptor: ${name} - ${config.description}`);
+        }
+      }
+    }
+  }
+
+  // 初始化拦截器
+  initializeInterceptors();
 
   // ==================== 工具函数 ====================
   
@@ -300,40 +442,22 @@
         }
       }
 
-      // 3. 处理请求体
-      if (requestData.body || requestData.data) {
-        let bodyStr = requestData.body || requestData.data;
-        if (typeof bodyStr !== 'string') {
-          bodyStr = JSON.stringify(bodyStr);
-        }
-
-        try {
-          let body = JSON.parse(bodyStr);
-
-          // 3.1 record-request-events: 替换 Conversation ID
-          if (url.includes('record-request-events')) {
-            body = replaceConversationIds(body);
+      // 3. 使用拦截器处理请求体
+      for (const [name, handler] of interceptorMap) {
+        if (handler.shouldIntercept(url)) {
+          if (handler.isSpecial) {
+            const result = handler.processRequest(requestData);
+            if (result && result.modified) {
+              // 更新请求体
+              if (result.body) {
+                requestData.body = result.body;
+              }
+              if (result.data) {
+                requestData.data = result.data;
+              }
+              console.log(`[AugmentInterceptor] Request processed by ${name} interceptor`);
+            }
           }
-
-          // 3.2 report-feature-vector: 替换 Feature Vector
-          if (url.includes('report-feature-vector')) {
-            body = replaceFeatureVectors(body);
-          }
-
-          // 3.3 chat-stream: 保留 Blob 数据 (不清除)
-          // 注意: v2 版本保留 Blob 数据以保持完整聊天上下文
-          // release1 会清除 Blob 导致上下文丢失
-
-          // 更新请求体
-          const newBodyStr = JSON.stringify(body);
-          if (requestData.body) {
-            requestData.body = newBodyStr;
-          }
-          if (requestData.data) {
-            requestData.data = newBodyStr;
-          }
-        } catch (e) {
-          // 如果不是 JSON,保持原样
         }
       }
 
