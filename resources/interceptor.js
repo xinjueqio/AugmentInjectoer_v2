@@ -111,28 +111,8 @@
 
   // ==================== 全局变量 ====================
 
-  /**
-   * 加载或生成 Session ID (支持持久化)
-   */
-  function loadOrGenerateSessionId() {
-    // 尝试从全局状态恢复
-    const globalObj = typeof globalThis !== 'undefined' ? globalThis :
-                     (typeof global !== 'undefined' ? global : {});
-
-    if (globalObj.AUGMENT_PERSISTED_SESSION_ID) {
-      console.log('[AugmentInterceptor] ✅ Restored session ID from global state');
-      return globalObj.AUGMENT_PERSISTED_SESSION_ID;
-    }
-
-    // 生成新的并持久化到全局状态
-    const newId = generateUUID();
-    globalObj.AUGMENT_PERSISTED_SESSION_ID = newId;
-    console.log('[AugmentInterceptor] ✅ Generated new session ID and persisted');
-    return newId;
-  }
-
-  // 伪造的 Session ID (支持重启后恢复)
-  let FAKE_SESSION_ID = loadOrGenerateSessionId();
+  // 伪造的 Session ID (初始值,会被 token-login-enhanced.js 更新)
+  let FAKE_SESSION_ID = generateUUID();
 
   // Conversation ID 映射表
   const conversationIdMap = new Map();
@@ -947,13 +927,7 @@
       updateFakeSessionId: function(newId) {
         if (newId && typeof newId === 'string') {
           FAKE_SESSION_ID = newId;
-
-          // ✅ 持久化到全局状态
-          const globalObj = typeof globalThis !== 'undefined' ? globalThis :
-                           (typeof global !== 'undefined' ? global : {});
-          globalObj.AUGMENT_PERSISTED_SESSION_ID = newId;
-
-          console.log('[AugmentInterceptor] ✅ SessionId updated and persisted:', newId);
+          console.log('[AugmentInterceptor] SessionId updated to:', newId);
           return true;
         }
         return false;
@@ -980,13 +954,7 @@
       updateFakeSessionId: function(newId) {
         if (newId && typeof newId === 'string') {
           FAKE_SESSION_ID = newId;
-
-          // ✅ 持久化到全局状态
-          const globalObj = typeof globalThis !== 'undefined' ? globalThis :
-                           (typeof global !== 'undefined' ? global : {});
-          globalObj.AUGMENT_PERSISTED_SESSION_ID = newId;
-
-          console.log('[AugmentInterceptor] ✅ SessionId updated and persisted (global):', newId);
+          console.log('[AugmentInterceptor] SessionId updated to:', newId);
           return true;
         }
         return false;

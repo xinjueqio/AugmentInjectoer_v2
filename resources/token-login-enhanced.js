@@ -405,34 +405,74 @@ class AugmentTokenLoginEnhanced {
 
   /**
    * ✅ 启动时恢复 Token 和 Session
-   * 从 Secret Storage 读取已保存的 Token,并更新拦截器的 Session ID
+   * 从 Secret Storage 读取已保存的 Token,从 globalState 恢复 Session ID
    */
   async restoreTokenOnStartup() {
     try {
-      this.logger.info('Attempting to restore token on startup...');
+      this.logger.info('Attempting to restore token and session on startup...');
 
       // 1. 从 Secret Storage 读取 Token
       const tokenData = await this.getAccessToken();
 
       if (tokenData.success && tokenData.accessToken) {
-        this.logger.info('✅ Found stored token, restoring session...');
+        this.logger.info('✅ Found stored token');
         this.logger.info('Tenant URL: ' + tokenData.tenantURL);
 
-        // 2. 更新拦截器的 Session ID
-        const sessionUpdated = await this.updateInterceptorSessionId();
+        // 2. 从 globalState 恢复 Session ID
+        const restoredSessionId = await this.restoreSessionIdFromStorage();
 
-        if (sessionUpdated) {
-          this.logger.info('✅ Token and session restored successfully');
-          this.logger.info('You are logged in and ready to use Augment');
+        if (restoredSessionId) {
+          // 使用恢复的 Session ID 更新拦截器
+          if (typeof global !== 'undefined' && global.AugmentInterceptor) {
+            if (typeof global.AugmentInterceptor.updateFakeSessionId === 'function') {
+              global.AugmentInterceptor.updateFakeSessionId(restoredSessionId);
+              this.logger.info('✅ Session ID restored from storage: ' + restoredSessionId);
+            }
+          }
         } else {
-          this.logger.warn('⚠️ Token found but session update failed');
+          // 没有保存的 Session ID,生成新的
+          this.logger.info('No saved session ID, generating new one...');
+          await this.updateInterceptorSessionId();
         }
+
+        this.logger.info('✅ Token and session restored successfully');
+        this.logger.info('You are logged in and ready to use Augment');
       } else {
         this.logger.info('ℹ️ No stored token found - please login first');
       }
     } catch (error) {
       this.logger.error('Failed to restore token on startup:', error);
       // 不抛出错误,允许扩展继续初始化
+    }
+  }
+
+  /**
+   * ✅ 从 globalState 恢复 Session ID
+   */
+  async restoreSessionIdFromStorage() {
+    try {
+      const sessionId = this.context.globalState.get('augment.sessionId');
+      if (sessionId && typeof sessionId === 'string') {
+        return sessionId;
+      }
+      return null;
+    } catch (error) {
+      this.logger.error('Failed to restore session ID from storage:', error);
+      return null;
+    }
+  }
+
+  /**
+   * ✅ 保存 Session ID 到 globalState
+   */
+  async saveSessionIdToStorage(sessionId) {
+    try {
+      await this.context.globalState.update('augment.sessionId', sessionId);
+      this.logger.info('Session ID saved to storage');
+      return true;
+    } catch (error) {
+      this.logger.error('Failed to save session ID to storage:', error);
+      return false;
     }
   }
 
@@ -509,7 +549,7 @@ class AugmentTokenLoginEnhanced {
   }
 
   /**
-   * 更新拦截器的 Session ID
+   * 更新拦截器的 Session ID (并持久化到 globalState)
    */
   async updateInterceptorSessionId() {
     try {
@@ -536,6 +576,9 @@ class AugmentTokenLoginEnhanced {
           window.AugmentInterceptor.FAKE_SESSION_ID = newSessionId;
         }
       }
+
+      // ✅ 持久化到 globalState
+      await this.saveSessionIdToStorage(newSessionId);
 
       return newSessionId;
     } catch (error) {
