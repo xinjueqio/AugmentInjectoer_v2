@@ -17,6 +17,9 @@
  * - 保留所有请求体数据，不清除任何字段
  * - 启用 record-request-events 拦截器
  * - 修复 HTTP 拦截器的参数传递 bug
+ *
+ * 注意：GitHub Actions 会直接注入此文件内容，不添加额外包裹
+ * 所以需要保持原有的 IIFE 结构
  */
 
 (function() {
