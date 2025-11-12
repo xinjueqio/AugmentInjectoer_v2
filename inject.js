@@ -69,10 +69,11 @@ function backupFile(filePath) {
  * 注入拦截器到 extension.js
  */
 function injectInterceptor(extensionDir) {
-  const extensionJsPath = path.join(extensionDir, 'extension', 'out', 'extension.js');
-  
+  // ✅ 修复：正确的路径是 out/extension.js
+  const extensionJsPath = path.join(extensionDir, 'out', 'extension.js');
+
   if (!fs.existsSync(extensionJsPath)) {
-    throw new Error('找不到 extension.js');
+    throw new Error(`找不到 extension.js: ${extensionJsPath}`);
   }
 
   backupFile(extensionJsPath);
@@ -83,14 +84,27 @@ function injectInterceptor(extensionDir) {
   );
 
   let extensionCode = fs.readFileSync(extensionJsPath, 'utf8');
-  
+
+  // 移除旧的注入代码（release1 或之前的 v2）
+  if (extensionCode.includes('// === Augment Interceptor Injection Start ===')) {
+    logger.info('检测到旧版本注入代码，正在移除...');
+    const startMarker = '// === Augment Interceptor Injection Start ===';
+    const endMarker = '// === Augment Interceptor Injection End ===';
+    const startIndex = extensionCode.indexOf(startMarker);
+    const endIndex = extensionCode.indexOf(endMarker);
+    if (startIndex !== -1 && endIndex !== -1) {
+      extensionCode = extensionCode.substring(0, startIndex) + extensionCode.substring(endIndex + endMarker.length);
+      logger.success('已移除旧版本注入代码');
+    }
+  }
+
   // 在文件开头注入拦截器
   if (!extensionCode.includes('// AUGMENT_INJECTOR_V2')) {
     extensionCode = `// AUGMENT_INJECTOR_V2\n${interceptorCode}\n\n${extensionCode}`;
     fs.writeFileSync(extensionJsPath, extensionCode);
-    logger.success('已注入拦截器');
+    logger.success('已注入拦截器 v2');
   } else {
-    logger.warn('拦截器已存在，跳过注入');
+    logger.warn('拦截器 v2 已存在，跳过注入');
   }
 }
 
@@ -103,7 +117,8 @@ function injectTokenLogin(extensionDir) {
     'utf8'
   );
 
-  const targetPath = path.join(extensionDir, 'extension', 'out', 'token-login.js');
+  // ✅ 修复：正确的路径是 out/token-login.js
+  const targetPath = path.join(extensionDir, 'out', 'token-login.js');
   fs.writeFileSync(targetPath, tokenLoginCode);
   logger.success('已注入 Token 登录功能');
 }
@@ -117,7 +132,8 @@ function injectBalanceMonitor(extensionDir) {
     'utf8'
   );
 
-  const targetPath = path.join(extensionDir, 'extension', 'out', 'balance-monitor.js');
+  // ✅ 修复：正确的路径是 out/balance-monitor.js
+  const targetPath = path.join(extensionDir, 'out', 'balance-monitor.js');
   fs.writeFileSync(targetPath, balanceCode);
   logger.success('已注入余额监控功能');
 }
