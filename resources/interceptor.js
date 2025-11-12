@@ -612,13 +612,18 @@
     return module;
   };
 
-  // 复制 require 的所有属性和方法
+  // 复制 require 的所有属性和方法（包括不可枚举属性）
   Object.setPrototypeOf(newRequire, originalRequire);
-  Object.keys(originalRequire).forEach(key => {
+
+  // 复制所有属性（包括不可枚举的）
+  Object.getOwnPropertyNames(originalRequire).forEach(key => {
     try {
-      newRequire[key] = originalRequire[key];
+      const descriptor = Object.getOwnPropertyDescriptor(originalRequire, key);
+      if (descriptor) {
+        Object.defineProperty(newRequire, key, descriptor);
+      }
     } catch (e) {
-      // 忽略只读属性
+      // 忽略只读属性或无法复制的属性
     }
   });
 
