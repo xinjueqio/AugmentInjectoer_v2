@@ -335,10 +335,7 @@ jobs:
               injection = f"// === {tag} Start ===\n"
               injection += f"// 注入时间: {timestamp}\n"
               injection += f"// 注入版本: 1.0\n"
-              injection += "!function(){\n"
-              injection += '"use strict";\n'
               injection += inject_content + "\n"
-              injection += "}();\n"
               injection += f"// === {tag} End ===\n\n"
               
               js_file.write_text(injection + content, encoding='utf-8')
@@ -348,19 +345,16 @@ jobs:
           def inject_tail(js_file, inject_content, tag):
               log(f"Injecting {tag} at tail...")
               content = js_file.read_text(encoding='utf-8')
-              
+
               # Remove existing injection if present
               pattern = rf"// === {re.escape(tag)} Start ===.*?// === {re.escape(tag)} End ===\s*"
               content = re.sub(pattern, '', content, flags=re.DOTALL)
-              
+
               # Create injection with proper formatting
               timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
               injection = f"\n\n// === {tag} Start ===\n"
               injection += f"// 注入时间: {timestamp}\n"
-              injection += "!function(){\n"
-              injection += '"use strict";\n'
               injection += inject_content + "\n"
-              injection += "}();\n"
               injection += f"// === {tag} End ==="
               
               js_file.write_text(content + injection, encoding='utf-8')
