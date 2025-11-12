@@ -260,19 +260,19 @@
     // 替换 IOPlatformUUID
     result = result.replace(
       /"IOPlatformUUID"\s*=\s*"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"/g,
-      \`"IOPlatformUUID" = "\${FAKE_IDENTIFIERS.uuid}"\`
+      `"IOPlatformUUID" = "${FAKE_IDENTIFIERS.uuid}"`
     );
 
     // 替换 IOPlatformSerialNumber
     result = result.replace(
       /"IOPlatformSerialNumber"\s*=\s*"[A-Z0-9]+"/g,
-      \`"IOPlatformSerialNumber" = "\${FAKE_IDENTIFIERS.serialNumber}"\`
+      `"IOPlatformSerialNumber" = "${FAKE_IDENTIFIERS.serialNumber}"`
     );
 
     // 替换 board-id
     result = result.replace(
       /"board-id"\s*=\s*<"Mac-[0-9A-Fa-f]+">/g,
-      \`"board-id" = <"Mac-\${FAKE_IDENTIFIERS.macAddress}">\`
+      `"board-id" = <"Mac-${FAKE_IDENTIFIERS.macAddress}">`
     );
 
     return result;
