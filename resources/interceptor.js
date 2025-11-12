@@ -156,8 +156,8 @@
       description: '聊天流端点拦截器 (保留 Blob 数据)',
     },
     'record-request-events': {
-      enabled: true,
-      description: '请求事件记录端点拦截器',
+      enabled: false,  // ⚠️ 已禁用：替换 conversation_id 会导致上下文丢失
+      description: '请求事件记录端点拦截器 (已禁用)',
     },
     'report-feature-vector': {
       enabled: true,
@@ -355,6 +355,7 @@
 
   /**
    * 递归替换对象中的 Conversation ID
+   * ⚠️ 已禁用：替换 conversation_id 会导致上下文丢失
    */
   function replaceConversationIds(obj) {
     if (typeof obj !== 'object' || obj === null) {
@@ -368,11 +369,8 @@
     const result = {};
     for (const [key, value] of Object.entries(obj)) {
       if (key === 'conversation_id' && isUUID(value)) {
-        // 替换 Conversation ID
-        if (!conversationIdMap.has(value)) {
-          conversationIdMap.set(value, generateUUID());
-        }
-        result[key] = conversationIdMap.get(value);
+        // ✅ 不替换 conversation_id，保持原值以保留上下文
+        result[key] = value;
       } else if (typeof value === 'object') {
         result[key] = replaceConversationIds(value);
       } else {
