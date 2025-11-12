@@ -49,14 +49,19 @@ class AugmentTokenLoginEnhanced {
       // 设置 Token 注入
       this.setupTokenInjection();
 
-      // ✅ 新增: 启动时恢复 Token 和 Session
-      await this.restoreTokenOnStartup();
-
       // 注册深链接处理器
       try {
         this.registerDeepLinkHandler();
       } catch (error) {
         this.logger.warn('registerDeepLinkHandler failed:', error);
+      }
+
+      // ✅ 启动时恢复 Token 和 Session (放在最后,确保即使上面失败也能执行)
+      try {
+        await this.restoreTokenOnStartup();
+      } catch (error) {
+        this.logger.error('restoreTokenOnStartup failed:', error);
+        // 不抛出错误,允许扩展继续初始化
       }
 
       this.isInitialized = true;
