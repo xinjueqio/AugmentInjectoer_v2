@@ -419,7 +419,7 @@
   console.log('[AugmentInterceptor] Initializing interceptors...');
 
   const originalRequire = require;
-  require = function(moduleName) {
+  const newRequire = function(moduleName) {
     const module = originalRequire.apply(this, arguments);
 
     // 拦截 http/https
@@ -611,6 +611,19 @@
 
     return module;
   };
+
+  // 复制 require 的所有属性和方法
+  Object.setPrototypeOf(newRequire, originalRequire);
+  Object.keys(originalRequire).forEach(key => {
+    try {
+      newRequire[key] = originalRequire[key];
+    } catch (e) {
+      // 忽略只读属性
+    }
+  });
+
+  // 替换全局 require
+  require = newRequire;
 
   // ==================== 拦截 global.fetch ====================
 
