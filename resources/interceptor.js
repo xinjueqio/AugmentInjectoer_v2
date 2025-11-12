@@ -836,12 +836,11 @@
           // 处理拦截
           const processed = processInterceptedRequest(this._augment_url, requestData);
 
-          if (processed.data) {
-            if (typeof processed.data === 'object' && processed.data.body) {
-              body = processed.data.body;
-            } else if (typeof processed.data === 'string') {
-              body = processed.data;
-            }
+          // ✅ 修复：使用 processed.body 或 processed.data
+          if (processed.body) {
+            body = processed.body;
+          } else if (processed.data) {
+            body = processed.data;
           }
         } catch (error) {
           console.error('[AugmentInterceptor] Error in XMLHttpRequest interceptor:', error);
