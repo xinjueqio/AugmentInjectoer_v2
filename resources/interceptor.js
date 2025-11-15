@@ -368,6 +368,7 @@
    */
   function getOrCreateConversationIdMapping(originalId) {
     log('🔍 [DEBUG] getOrCreateConversationIdMapping 被调用，原始 ID: ' + (originalId ? originalId.substring(0, 8) + '...' : 'null'), 'debug');
+    log('🔍 [DEBUG] 调用堆栈: ' + new Error().stack.split('\n').slice(1, 4).join(' <- '), 'debug');
 
     if (!originalId || typeof originalId !== 'string') {
       log('⚠️ [DEBUG] Conversation ID 无效，返回原值', 'debug');
@@ -385,6 +386,7 @@
       const mappedId = conversationIdMap.get(originalId);
       log('♻️ 复用已有 Conversation ID 映射: ' + originalId.substring(0, 8) + '... → ' + mappedId.substring(0, 8) + '...');
       log('🔍 [DEBUG] 当前映射表大小: ' + conversationIdMap.size, 'debug');
+      log('🔍 [DEBUG] 所有映射: ' + JSON.stringify(Array.from(conversationIdMap.entries()).map(([k, v]) => [k.substring(0, 8), v.substring(0, 8)])), 'debug');
       return mappedId;
     }
 
@@ -394,6 +396,7 @@
 
     log('🎲 新建 Conversation ID 映射: ' + originalId.substring(0, 8) + '... → ' + newId.substring(0, 8) + '...');
     log('🔍 [DEBUG] 映射表大小: ' + conversationIdMap.size, 'debug');
+    log('🔍 [DEBUG] 所有映射: ' + JSON.stringify(Array.from(conversationIdMap.entries()).map(([k, v]) => [k.substring(0, 8), v.substring(0, 8)])), 'debug');
 
     // 保存到文件
     const saved = saveConversationIdMappings();
@@ -564,20 +567,27 @@
       },
       processRequest: function(requestData) {
         try {
+          log('========================================');
           log('🔍 [DEBUG] chat-stream 拦截器触发', 'debug');
+          log('🔍 [DEBUG] 请求 URL: ' + (requestData.url || 'unknown'), 'debug');
 
           let body = requestData.body || requestData.data;
           if (!body) {
             log('⚠️ [DEBUG] chat-stream 请求体为空', 'debug');
+            log('========================================');
             return { type: 'skip' };
           }
+
+          log('🔍 [DEBUG] 请求体类型: ' + typeof body, 'debug');
+          log('🔍 [DEBUG] 请求体长度: ' + (typeof body === 'string' ? body.length : 'N/A'), 'debug');
 
           if (typeof body === 'string') {
             try {
               body = JSON.parse(body);
               log('🔍 [DEBUG] chat-stream 请求体已解析为 JSON', 'debug');
             } catch (e) {
-              log('⚠️ [DEBUG] chat-stream 请求体 JSON 解析失败', 'debug');
+              log('⚠️ [DEBUG] chat-stream 请求体 JSON 解析失败: ' + e.message, 'debug');
+              log('========================================');
               return { type: 'skip' };
             }
           }
@@ -585,6 +595,15 @@
           // 调试模式：输出完整请求体结构
           if (DEBUG_MODE) {
             log('🔍 [DEBUG] chat-stream 请求体字段: ' + Object.keys(body).join(', '), 'debug');
+            if (body.conversation_id) {
+              log('🔍 [DEBUG] conversation_id: ' + body.conversation_id.substring(0, 8) + '...', 'debug');
+            }
+            if (body.blobs) {
+              log('🔍 [DEBUG] blobs 数量: ' + (Array.isArray(body.blobs) ? body.blobs.length : 'not array'), 'debug');
+            }
+            if (body.message) {
+              log('🔍 [DEBUG] message 长度: ' + (typeof body.message === 'string' ? body.message.length : 'not string'), 'debug');
+            }
           }
 
           // ✅ 参考 augment-account-manager 的风控策略
@@ -607,6 +626,7 @@
             // 替换 conversation_id
             if (body.conversation_id && typeof body.conversation_id === 'string') {
               const originalId = body.conversation_id;
+              log('🔍 [DEBUG] 准备替换 conversation_id: ' + originalId.substring(0, 8) + '...', 'debug');
               body.conversation_id = getOrCreateConversationIdMapping(originalId);
               modified = true;
               log('🎲 chat-stream 替换 conversation_id: ' + originalId.substring(0, 8) + '... → ' + body.conversation_id.substring(0, 8) + '...');
@@ -615,22 +635,28 @@
             }
 
             if (modified) {
+              const newBody = JSON.stringify(body);
               log('✅ chat-stream 请求已修改，返回新的请求体');
+              log('🔍 [DEBUG] 新请求体长度: ' + newBody.length, 'debug');
+              log('========================================');
               return {
                 type: 'modify',
                 data: {
-                  body: JSON.stringify(body)
+                  body: newBody
                 }
               };
             } else {
               log('🔍 [DEBUG] chat-stream 请求未修改', 'debug');
+              log('========================================');
             }
           }
 
+          log('========================================');
           return { type: 'skip' };
         } catch (error) {
           log('❌ Error in chat-stream handler: ' + error.message, 'error');
           log('❌ Error stack: ' + error.stack, 'debug');
+          log('========================================');
           return { type: 'skip' };
         }
       },
@@ -958,6 +984,7 @@
 
       // 调试：记录所有请求
       if (DEBUG_MODE && url && (url.includes('chat-stream') || url.includes('record-request-events'))) {
+        log('========================================');
         log('🔍 [DEBUG] processInterceptedRequest 被调用', 'debug');
         log('🔍 [DEBUG] URL: ' + url, 'debug');
         log('🔍 [DEBUG] 请求数据: ' + JSON.stringify({
@@ -973,6 +1000,7 @@
       if (requestData.headers) {
         if (replaceSessionIds(requestData.headers)) {
           modified = true;
+          log('✅ Session ID 已替换');
         }
       }
 
@@ -982,50 +1010,69 @@
         if (isFeatureVector(vector)) {
           requestData.headers['x-signature-vector'] = generateFakeFeatureVector();
           modified = true;
+          log('✅ Feature Vector 已替换');
         }
       }
 
       // 3. 使用拦截器处理请求体 (参考 release1 的 type 判断逻辑)
+      log('🔍 [DEBUG] 开始遍历拦截器，总数: ' + interceptorMap.size, 'debug');
       for (const [name, handler] of interceptorMap) {
+        log('🔍 [DEBUG] 检查拦截器: ' + name, 'debug');
+        log('🔍 [DEBUG] shouldIntercept 结果: ' + handler.shouldIntercept(url), 'debug');
+
         if (handler.shouldIntercept(url)) {
-          if (DEBUG_MODE) {
-            log('🔍 [DEBUG] 拦截器匹配: ' + name, 'debug');
-          }
+          log('🎯 拦截器匹配: ' + name);
+          log('🔍 [DEBUG] isSpecial: ' + handler.isSpecial, 'debug');
 
           if (handler.isSpecial) {
+            log('🔍 [DEBUG] 调用 ' + name + ' 拦截器的 processRequest', 'debug');
             const result = handler.processRequest(requestData);
+
+            log('🔍 [DEBUG] ' + name + ' 拦截器返回: ' + JSON.stringify(result ? { type: result.type, hasData: !!result.data } : null), 'debug');
 
             // ✅ 使用 release1 的判断逻辑: type === 'modify'
             if (result && result.type === 'modify' && result.data) {
+              log('✅ ' + name + ' 拦截器返回了修改结果');
+
               // 更新请求体
               if (typeof result.data === 'object' && result.data.body) {
+                log('🔍 [DEBUG] 更新请求体 (object.body)', 'debug');
                 requestData.body = result.data.body;
                 requestData.data = result.data.body;
                 modified = true;
               } else if (typeof result.data === 'string') {
+                log('🔍 [DEBUG] 更新请求体 (string)', 'debug');
                 requestData.body = result.data;
                 requestData.data = result.data;
                 modified = true;
               }
-              log(`Request processed by ${name} interceptor`);
-            } else if (DEBUG_MODE) {
-              log('🔍 [DEBUG] 拦截器返回: ' + JSON.stringify(result), 'debug');
+              log(`✅ Request processed by ${name} interceptor`);
+            } else {
+              log('⚠️ ' + name + ' 拦截器未返回修改结果', 'warn');
             }
+          } else {
+            log('⚠️ ' + name + ' 拦截器不是 special 类型', 'warn');
           }
         }
       }
 
       // ✅ 修复:返回正确的格式 { type: 'modify'/'skip', data: requestData }
       if (modified) {
+        log('✅ processInterceptedRequest 返回修改结果');
+        log('========================================');
         return {
           type: 'modify',
           data: requestData
         };
       }
 
+      log('⚠️ processInterceptedRequest 返回跳过结果');
+      log('========================================');
       return { type: 'skip' };
     } catch (error) {
-      log('Error processing request: ' + error.message, 'error');
+      log('❌ Error processing request: ' + error.message, 'error');
+      log('❌ Error stack: ' + error.stack, 'error');
+      log('========================================');
       return { type: 'skip' };
     }
   }
@@ -1570,39 +1617,49 @@
                                   urlStr.includes('/record-request-events') ||
                                   urlStr.includes('/report-feature-vector');
 
-          if (shouldIntercept && options.body) {
-            if (DEBUG_MODE) {
+          if (shouldIntercept) {
+            log('🎯 检测到需要拦截的请求: ' + urlStr);
+            log('🔍 [DEBUG] options.body 存在: ' + (!!options.body), 'debug');
+            log('🔍 [DEBUG] options.body 类型: ' + typeof options.body, 'debug');
+
+            if (options.body) {
               log('🔍 [DEBUG] 拦截 Fetch 请求: ' + urlStr, 'debug');
-            }
 
-            // 创建请求数据对象
-            const requestData = {
-              url: urlStr,
-              headers: options.headers || {},
-              body: options.body,
-              method: options.method || 'POST'
-            };
+              // 创建请求数据对象
+              const requestData = {
+                url: urlStr,
+                headers: options.headers || {},
+                body: options.body,
+                method: options.method || 'POST'
+              };
 
-            // 调用拦截器处理
-            const result = processInterceptedRequest(urlStr, requestData);
+              log('🔍 [DEBUG] processInterceptedRequest 被调用', 'debug');
 
-            // 检查是否需要修改
-            if (result && result.type === 'modify' && result.data) {
-              // 更新 options.body
-              if (result.data.body && result.data.body !== options.body) {
-                options.body = result.data.body;
-                if (DEBUG_MODE) {
-                  log('🔍 [DEBUG] Fetch 请求体已修改', 'debug');
+              // 调用拦截器处理
+              const result = processInterceptedRequest(urlStr, requestData);
+
+              log('🔍 [DEBUG] processInterceptedRequest 返回: ' + JSON.stringify(result ? { type: result.type, hasData: !!result.data } : null), 'debug');
+
+              // 检查是否需要修改
+              if (result && result.type === 'modify' && result.data) {
+                // 更新 options.body
+                if (result.data.body && result.data.body !== options.body) {
+                  log('🔄 正在修改 Fetch 请求体...');
+                  options.body = result.data.body;
+                  log('✅ Fetch 请求体已修改');
                 }
-              }
 
-              // 更新 options.headers
-              if (result.data.headers && result.data.headers !== options.headers) {
-                options.headers = result.data.headers;
-                if (DEBUG_MODE) {
-                  log('🔍 [DEBUG] Fetch 请求头已修改', 'debug');
+                // 更新 options.headers
+                if (result.data.headers && result.data.headers !== options.headers) {
+                  log('🔄 正在修改 Fetch 请求头...');
+                  options.headers = result.data.headers;
+                  log('✅ Fetch 请求头已修改');
                 }
+              } else {
+                log('⚠️ processInterceptedRequest 未返回修改结果', 'warn');
               }
+            } else {
+              log('⚠️ 需要拦截的请求但没有 body: ' + urlStr, 'warn');
             }
           }
 
