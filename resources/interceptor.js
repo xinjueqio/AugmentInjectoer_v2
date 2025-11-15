@@ -30,13 +30,17 @@
   let outputChannel = null;
   let vscodeModule = null;
 
+  // 调试模式开关（设置为 true 可以看到更详细的日志）
+  const DEBUG_MODE = true;
+
   try {
     vscodeModule = require('vscode');
     if (vscodeModule && vscodeModule.window && typeof vscodeModule.window.createOutputChannel === 'function') {
       outputChannel = vscodeModule.window.createOutputChannel('Augment Interceptor');
       outputChannel.appendLine('========================================');
-      outputChannel.appendLine('Augment Interceptor v2.0 已加载');
+      outputChannel.appendLine('Augment Interceptor v2.1 已加载');
       outputChannel.appendLine('时间: ' + new Date().toLocaleString());
+      outputChannel.appendLine('调试模式: ' + (DEBUG_MODE ? '开启' : '关闭'));
       outputChannel.appendLine('========================================');
     }
   } catch (e) {
@@ -46,9 +50,14 @@
   /**
    * 统一的日志输出函数
    * @param {string} message - 日志消息
-   * @param {string} level - 日志级别: 'info', 'warn', 'error'
+   * @param {string} level - 日志级别: 'info', 'warn', 'error', 'debug'
    */
   function log(message, level = 'info') {
+    // 如果是 debug 级别且调试模式关闭，则不输出
+    if (level === 'debug' && !DEBUG_MODE) {
+      return;
+    }
+
     const timestamp = new Date().toLocaleTimeString();
     const prefix = `[${timestamp}] [AugmentInterceptor]`;
     const fullMessage = `${prefix} ${message}`;
@@ -58,6 +67,8 @@
       console.error(fullMessage);
     } else if (level === 'warn') {
       console.warn(fullMessage);
+    } else if (level === 'debug') {
+      console.log('[DEBUG] ' + fullMessage);
     } else {
       console.log(fullMessage);
     }
@@ -356,19 +367,24 @@
    * 参考 augment-account-manager 的实现
    */
   function getOrCreateConversationIdMapping(originalId) {
+    log('🔍 [DEBUG] getOrCreateConversationIdMapping 被调用，原始 ID: ' + (originalId ? originalId.substring(0, 8) + '...' : 'null'), 'debug');
+
     if (!originalId || typeof originalId !== 'string') {
+      log('⚠️ [DEBUG] Conversation ID 无效，返回原值', 'debug');
       return originalId;
     }
 
     // 检查是否是 UUID 格式
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(originalId)) {
+      log('⚠️ [DEBUG] Conversation ID 不是 UUID 格式，返回原值', 'debug');
       return originalId;
     }
 
     // 如果已经映射过，返回映射的 ID
     if (conversationIdMap.has(originalId)) {
       const mappedId = conversationIdMap.get(originalId);
-      log('♻️ 复用已有 Conversation ID 映射: ' + originalId + ' → ' + mappedId);
+      log('♻️ 复用已有 Conversation ID 映射: ' + originalId.substring(0, 8) + '... → ' + mappedId.substring(0, 8) + '...');
+      log('🔍 [DEBUG] 当前映射表大小: ' + conversationIdMap.size, 'debug');
       return mappedId;
     }
 
@@ -376,15 +392,25 @@
     const newId = generateUUID();
     conversationIdMap.set(originalId, newId);
 
-    log('🎲 新建 Conversation ID 映射: ' + originalId + ' → ' + newId);
+    log('🎲 新建 Conversation ID 映射: ' + originalId.substring(0, 8) + '... → ' + newId.substring(0, 8) + '...');
+    log('🔍 [DEBUG] 映射表大小: ' + conversationIdMap.size, 'debug');
 
     // 保存到文件
-    saveConversationIdMappings();
+    const saved = saveConversationIdMappings();
+    if (saved) {
+      log('✅ Conversation ID 映射已保存到文件');
+    } else {
+      log('❌ Conversation ID 映射保存失败', 'error');
+    }
 
     return newId;
   }
 
   // ==================== 初始化持久化数据 ====================
+
+  log('========================================');
+  log('🚀 开始初始化持久化数据...');
+  log('========================================');
 
   // 启动时加载 Session ID
   const loadedSessionId = loadSessionId();
@@ -393,13 +419,28 @@
     log('🔄 使用已保存的 Session ID: ' + FAKE_SESSION_ID);
   } else {
     // 保存新生成的 Session ID
-    saveSessionId(FAKE_SESSION_ID);
-    log('🆕 生成并保存新的 Session ID: ' + FAKE_SESSION_ID);
+    const saved = saveSessionId(FAKE_SESSION_ID);
+    if (saved) {
+      log('🆕 生成并保存新的 Session ID: ' + FAKE_SESSION_ID);
+    } else {
+      log('⚠️ 新 Session ID 保存失败，但仍将使用: ' + FAKE_SESSION_ID, 'warn');
+    }
   }
 
   // 启动时加载 Conversation ID 映射
-  loadConversationIdMappings();
+  const loadedMappings = loadConversationIdMappings();
   log('🔄 已加载 Conversation ID 映射，当前数量: ' + conversationIdMap.size);
+
+  if (DEBUG_MODE && conversationIdMap.size > 0) {
+    log('🔍 [DEBUG] 已加载的 Conversation ID 映射:', 'debug');
+    conversationIdMap.forEach((fakeId, realId) => {
+      log('  - ' + realId.substring(0, 8) + '... → ' + fakeId.substring(0, 8) + '...', 'debug');
+    });
+  }
+
+  log('========================================');
+  log('✅ 持久化数据初始化完成');
+  log('========================================');
 
   // 伪造的硬件标识符
   const FAKE_IDENTIFIERS = {
@@ -523,17 +564,27 @@
       },
       processRequest: function(requestData) {
         try {
+          log('🔍 [DEBUG] chat-stream 拦截器触发', 'debug');
+
           let body = requestData.body || requestData.data;
           if (!body) {
+            log('⚠️ [DEBUG] chat-stream 请求体为空', 'debug');
             return { type: 'skip' };
           }
 
           if (typeof body === 'string') {
             try {
               body = JSON.parse(body);
+              log('🔍 [DEBUG] chat-stream 请求体已解析为 JSON', 'debug');
             } catch (e) {
+              log('⚠️ [DEBUG] chat-stream 请求体 JSON 解析失败', 'debug');
               return { type: 'skip' };
             }
+          }
+
+          // 调试模式：输出完整请求体结构
+          if (DEBUG_MODE) {
+            log('🔍 [DEBUG] chat-stream 请求体字段: ' + Object.keys(body).join(', '), 'debug');
           }
 
           // ✅ 参考 augment-account-manager 的风控策略
@@ -545,9 +596,12 @@
 
             // 清空 blobs 数组
             if (body.blobs && Array.isArray(body.blobs)) {
+              const blobsCount = body.blobs.length;
               body.blobs = [];
               modified = true;
-              log('🧹 清理 chat-stream 数据: 已清空 blobs 数组');
+              log('🧹 清理 chat-stream 数据: 已清空 ' + blobsCount + ' 个 blobs');
+            } else {
+              log('🔍 [DEBUG] chat-stream 请求体中没有 blobs 字段', 'debug');
             }
 
             // 替换 conversation_id
@@ -555,22 +609,28 @@
               const originalId = body.conversation_id;
               body.conversation_id = getOrCreateConversationIdMapping(originalId);
               modified = true;
-              log('🎲 chat-stream 随机替换 conversation_id: ' + originalId + ' → ' + body.conversation_id);
+              log('🎲 chat-stream 替换 conversation_id: ' + originalId.substring(0, 8) + '... → ' + body.conversation_id.substring(0, 8) + '...');
+            } else {
+              log('⚠️ chat-stream 请求体中没有 conversation_id 字段（可能是新会话）', 'warn');
             }
 
             if (modified) {
+              log('✅ chat-stream 请求已修改，返回新的请求体');
               return {
                 type: 'modify',
                 data: {
                   body: JSON.stringify(body)
                 }
               };
+            } else {
+              log('🔍 [DEBUG] chat-stream 请求未修改', 'debug');
             }
           }
 
           return { type: 'skip' };
         } catch (error) {
-          log('Error in chat-stream handler: ' + error.message, 'error');
+          log('❌ Error in chat-stream handler: ' + error.message, 'error');
+          log('❌ Error stack: ' + error.stack, 'debug');
           return { type: 'skip' };
         }
       },
@@ -582,15 +642,20 @@
       },
       processRequest: function(requestData) {
         try {
+          log('🔍 [DEBUG] record-request-events 拦截器触发', 'debug');
+
           let body = requestData.body || requestData.data;
           if (!body) {
+            log('⚠️ [DEBUG] record-request-events 请求体为空', 'debug');
             return { type: 'skip' };
           }
 
           if (typeof body === 'string') {
             try {
               body = JSON.parse(body);
+              log('🔍 [DEBUG] record-request-events 请求体已解析为 JSON', 'debug');
             } catch (e) {
+              log('⚠️ [DEBUG] record-request-events 请求体 JSON 解析失败', 'debug');
               return { type: 'skip' };
             }
           }
@@ -598,6 +663,8 @@
           // ✅ 参考 augment-account-manager 的风控策略
           // 递归替换所有 conversation_id
           if (body && typeof body === 'object') {
+            let replacementCount = 0;
+
             const processData = function(data) {
               if (Array.isArray(data)) {
                 return data.map(item => processData(item));
@@ -607,7 +674,8 @@
                 for (const [key, value] of Object.entries(data)) {
                   if (key === 'conversation_id' && typeof value === 'string') {
                     result[key] = getOrCreateConversationIdMapping(value);
-                    log('🎲 随机替换 conversation_id: ' + value + ' → ' + result[key]);
+                    replacementCount++;
+                    log('🎲 record-request-events 替换 conversation_id: ' + value.substring(0, 8) + '... → ' + result[key].substring(0, 8) + '...');
                   } else {
                     result[key] = processData(value);
                   }
@@ -618,17 +686,24 @@
             };
 
             const processedBody = processData(body);
-            return {
-              type: 'modify',
-              data: {
-                body: JSON.stringify(processedBody)
-              }
-            };
+
+            if (replacementCount > 0) {
+              log('✅ record-request-events 共替换 ' + replacementCount + ' 个 conversation_id');
+              return {
+                type: 'modify',
+                data: {
+                  body: JSON.stringify(processedBody)
+                }
+              };
+            } else {
+              log('🔍 [DEBUG] record-request-events 未发现需要替换的 conversation_id', 'debug');
+            }
           }
 
           return { type: 'skip' };
         } catch (error) {
-          log('Error in record-request-events handler: ' + error.message, 'error');
+          log('❌ Error in record-request-events handler: ' + error.message, 'error');
+          log('❌ Error stack: ' + error.stack, 'debug');
           return { type: 'skip' };
         }
       },
@@ -1197,11 +1272,47 @@
       };
 
       // ✅ 修复：添加 spawn 拦截逻辑
+      // Git 命令统计（仅调试模式输出）
+      let gitCommandStats = {};
+      let gitStatsTimer = null;
+
       module.spawn = function(command, args, options) {
         // spawn 通常用于长时间运行的进程，不适合直接修改输出
-        // 但我们可以记录日志，如果是 git 命令则警告
-        if (typeof command === 'string' && command.includes('git')) {
-          log('⚠️ Git command detected via spawn: ' + command + ' ' + (args || []).join(' '), 'warn');
+        // 只在调试模式下记录 Git 命令统计
+        if (DEBUG_MODE && typeof command === 'string' && command.includes('git')) {
+          const argsStr = (args || []).join(' ');
+          const fullCommand = command + ' ' + argsStr;
+
+          // 统计命令次数
+          if (!gitCommandStats[fullCommand]) {
+            gitCommandStats[fullCommand] = 0;
+          }
+          gitCommandStats[fullCommand]++;
+
+          // 清除之前的定时器
+          if (gitStatsTimer) {
+            clearTimeout(gitStatsTimer);
+          }
+
+          // 延迟 5 秒输出统计，避免频繁日志
+          gitStatsTimer = setTimeout(() => {
+            const totalCommands = Object.values(gitCommandStats).reduce((a, b) => a + b, 0);
+            if (totalCommands > 0) {
+              log('🔍 [DEBUG] Git 命令统计（最近 5 秒）: 共 ' + totalCommands + ' 次', 'debug');
+
+              // 只显示前 3 个最频繁的命令
+              const sortedCommands = Object.entries(gitCommandStats)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 3);
+
+              sortedCommands.forEach(([cmd, count]) => {
+                if (count > 1) {
+                  log('  - ' + cmd + ' (×' + count + ')', 'debug');
+                }
+              });
+            }
+            gitCommandStats = {};
+          }, 5000);
         }
         return originalSpawn.apply(this, arguments);
       };
