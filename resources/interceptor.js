@@ -956,6 +956,19 @@
     try {
       let modified = false;
 
+      // 调试：记录所有请求
+      if (DEBUG_MODE && url && (url.includes('chat-stream') || url.includes('record-request-events'))) {
+        log('🔍 [DEBUG] processInterceptedRequest 被调用', 'debug');
+        log('🔍 [DEBUG] URL: ' + url, 'debug');
+        log('🔍 [DEBUG] 请求数据: ' + JSON.stringify({
+          hasHeaders: !!requestData.headers,
+          hasBody: !!requestData.body,
+          hasData: !!requestData.data,
+          bodyType: typeof requestData.body,
+          dataType: typeof requestData.data
+        }), 'debug');
+      }
+
       // 1. 替换 Session ID (Headers) - 使用统一方法
       if (requestData.headers) {
         if (replaceSessionIds(requestData.headers)) {
@@ -975,6 +988,10 @@
       // 3. 使用拦截器处理请求体 (参考 release1 的 type 判断逻辑)
       for (const [name, handler] of interceptorMap) {
         if (handler.shouldIntercept(url)) {
+          if (DEBUG_MODE) {
+            log('🔍 [DEBUG] 拦截器匹配: ' + name, 'debug');
+          }
+
           if (handler.isSpecial) {
             const result = handler.processRequest(requestData);
 
@@ -991,12 +1008,14 @@
                 modified = true;
               }
               log(`Request processed by ${name} interceptor`);
+            } else if (DEBUG_MODE) {
+              log('🔍 [DEBUG] 拦截器返回: ' + JSON.stringify(result), 'debug');
             }
           }
         }
       }
 
-      // ✅ 修复：返回正确的格式 { type: 'modify'/'skip', data: requestData }
+      // ✅ 修复:返回正确的格式 { type: 'modify'/'skip', data: requestData }
       if (modified) {
         return {
           type: 'modify',
@@ -1516,6 +1535,200 @@
         return createExtensionWrapper(extension);
       }
     };
+  }
+
+  // ========================================
+  // Fetch API 拦截初始化
+  // ========================================
+
+  /**
+   * 初始化 Fetch API 拦截
+   * 参考 augment-account-manager 的实现
+   */
+  function initializeFetchInterceptor() {
+    try {
+      const globalObj = typeof global !== 'undefined' ? global :
+                        typeof window !== 'undefined' ? window : this;
+
+      if (!globalObj.fetch) {
+        log('⚠️ Fetch API 不存在，跳过拦截', 'warn');
+        return false;
+      }
+
+      const originalFetch = globalObj.fetch;
+
+      globalObj.fetch = function(url, options = {}) {
+        try {
+          const urlStr = url.toString();
+
+          if (DEBUG_MODE) {
+            log('🔍 [DEBUG] Fetch 请求: ' + urlStr, 'debug');
+          }
+
+          // 检查是否需要拦截
+          const shouldIntercept = urlStr.includes('/chat-stream') ||
+                                  urlStr.includes('/record-request-events') ||
+                                  urlStr.includes('/report-feature-vector');
+
+          if (shouldIntercept && options.body) {
+            if (DEBUG_MODE) {
+              log('🔍 [DEBUG] 拦截 Fetch 请求: ' + urlStr, 'debug');
+            }
+
+            // 创建请求数据对象
+            const requestData = {
+              url: urlStr,
+              headers: options.headers || {},
+              body: options.body,
+              method: options.method || 'POST'
+            };
+
+            // 调用拦截器处理
+            const result = processInterceptedRequest(urlStr, requestData);
+
+            // 检查是否需要修改
+            if (result && result.type === 'modify' && result.data) {
+              // 更新 options.body
+              if (result.data.body && result.data.body !== options.body) {
+                options.body = result.data.body;
+                if (DEBUG_MODE) {
+                  log('🔍 [DEBUG] Fetch 请求体已修改', 'debug');
+                }
+              }
+
+              // 更新 options.headers
+              if (result.data.headers && result.data.headers !== options.headers) {
+                options.headers = result.data.headers;
+                if (DEBUG_MODE) {
+                  log('🔍 [DEBUG] Fetch 请求头已修改', 'debug');
+                }
+              }
+            }
+          }
+
+          // 调用原始 fetch
+          return originalFetch.call(this, url, options);
+        } catch (error) {
+          log('❌ Fetch 拦截错误: ' + error.message, 'error');
+          if (DEBUG_MODE) {
+            log('❌ 错误堆栈: ' + error.stack, 'error');
+          }
+          // 出错时调用原始 fetch
+          return originalFetch.call(this, url, options);
+        }
+      };
+
+      log('✅ Fetch API 拦截已初始化');
+      return true;
+    } catch (error) {
+      log('❌ Fetch API 拦截初始化失败: ' + error.message, 'error');
+      return false;
+    }
+  }
+
+  /**
+   * 初始化 XMLHttpRequest 拦截
+   * 参考 augment-account-manager 的实现
+   */
+  function initializeXHRInterceptor() {
+    try {
+      const globalObj = typeof global !== 'undefined' ? global :
+                        typeof window !== 'undefined' ? window : this;
+
+      if (!globalObj.XMLHttpRequest) {
+        log('⚠️ XMLHttpRequest 不存在，跳过拦截', 'warn');
+        return false;
+      }
+
+      const OriginalXHR = globalObj.XMLHttpRequest;
+
+      globalObj.XMLHttpRequest = function() {
+        const xhr = new OriginalXHR();
+        const originalOpen = xhr.open;
+        const originalSend = xhr.send;
+
+        xhr.open = function(method, url, async, user, password) {
+          this._method = method;
+          this._url = url;
+
+          if (DEBUG_MODE) {
+            log('🔍 [DEBUG] XHR 请求: ' + method + ' ' + url, 'debug');
+          }
+
+          return originalOpen.apply(this, arguments);
+        };
+
+        xhr.send = function(body) {
+          try {
+            const urlStr = this._url || '';
+            const shouldIntercept = urlStr.includes('/chat-stream') ||
+                                    urlStr.includes('/record-request-events') ||
+                                    urlStr.includes('/report-feature-vector');
+
+            if (shouldIntercept && body) {
+              if (DEBUG_MODE) {
+                log('🔍 [DEBUG] 拦截 XHR 请求: ' + urlStr, 'debug');
+              }
+
+              // 创建请求数据对象
+              const requestData = {
+                url: urlStr,
+                headers: {},
+                body: body,
+                method: this._method || 'POST'
+              };
+
+              // 调用拦截器处理
+              const result = processInterceptedRequest(urlStr, requestData);
+
+              // 检查是否需要修改
+              if (result && result.type === 'modify' && result.data) {
+                // 使用修改后的 body
+                if (result.data.body && result.data.body !== body) {
+                  body = result.data.body;
+                  if (DEBUG_MODE) {
+                    log('🔍 [DEBUG] XHR 请求体已修改', 'debug');
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            log('❌ XHR 拦截错误: ' + error.message, 'error');
+          }
+
+          return originalSend.call(this, body);
+        };
+
+        return xhr;
+      };
+
+      log('✅ XMLHttpRequest 拦截已初始化');
+      return true;
+    } catch (error) {
+      log('❌ XMLHttpRequest 拦截初始化失败: ' + error.message, 'error');
+      return false;
+    }
+  }
+
+  // ========================================
+  // 立即执行初始化
+  // ========================================
+
+  log('========================================');
+  log('🚀 开始初始化网络拦截器...');
+  log('========================================');
+
+  const fetchInitialized = initializeFetchInterceptor();
+  const xhrInitialized = initializeXHRInterceptor();
+
+  if (fetchInitialized || xhrInitialized) {
+    log('========================================');
+    log('✅ 网络拦截器初始化完成');
+    log('   - Fetch API: ' + (fetchInitialized ? '✅' : '❌'));
+    log('   - XMLHttpRequest: ' + (xhrInitialized ? '✅' : '❌'));
+    log('========================================');
+  } else {
+    log('⚠️ 警告: 所有网络拦截器初始化失败', 'warn');
   }
 
   // 全局导出（与 module.exports 保持一致）
