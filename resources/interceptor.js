@@ -623,13 +623,11 @@
               log('🔍 [DEBUG] chat-stream 请求体中没有 blobs 字段', 'debug');
             }
 
-            // 替换 conversation_id
+            // ⚠️ 不再替换 conversation_id!
+            // 原因: conversation_id 用于在 LevelDB 中查找聊天记录
+            // 如果替换了 conversation_id,会导致无法加载历史聊天记录,造成上下文丢失
             if (body.conversation_id && typeof body.conversation_id === 'string') {
-              const originalId = body.conversation_id;
-              log('🔍 [DEBUG] 准备替换 conversation_id: ' + originalId.substring(0, 8) + '...', 'debug');
-              body.conversation_id = getOrCreateConversationIdMapping(originalId);
-              modified = true;
-              log('🎲 chat-stream 替换 conversation_id: ' + originalId.substring(0, 8) + '... → ' + body.conversation_id.substring(0, 8) + '...');
+              log('ℹ️ 保持 conversation_id 不变: ' + body.conversation_id.substring(0, 8) + '...');
             } else {
               log('⚠️ chat-stream 请求体中没有 conversation_id 字段（可能是新会话）', 'warn');
             }
@@ -699,9 +697,9 @@
                 const result = {};
                 for (const [key, value] of Object.entries(data)) {
                   if (key === 'conversation_id' && typeof value === 'string') {
-                    result[key] = getOrCreateConversationIdMapping(value);
-                    replacementCount++;
-                    log('🎲 record-request-events 替换 conversation_id: ' + value.substring(0, 8) + '... → ' + result[key].substring(0, 8) + '...');
+                    // ⚠️ 不再替换 conversation_id!
+                    result[key] = value;  // 保持原值
+                    log('ℹ️ record-request-events 保持 conversation_id 不变: ' + value.substring(0, 8) + '...');
                   } else {
                     result[key] = processData(value);
                   }
@@ -1602,6 +1600,12 @@
         return false;
       }
 
+      // ⚠️ 防止双重拦截
+      if (globalObj._fetchIntercepted) {
+        log('ℹ️ Fetch API 已被拦截，跳过重复拦截');
+        return true;
+      }
+
       const originalFetch = globalObj.fetch;
 
       globalObj.fetch = function(url, options = {}) {
@@ -1674,6 +1678,9 @@
           return originalFetch.call(this, url, options);
         }
       };
+
+      // 设置标志防止双重拦截
+      globalObj._fetchIntercepted = true;
 
       log('✅ Fetch API 拦截已初始化');
       return true;
